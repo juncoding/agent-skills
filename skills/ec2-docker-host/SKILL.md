@@ -1,16 +1,15 @@
 ---
 name: ec2-docker-host
 description: >-
-  Run multiple independent app projects side-by-side on ONE AWS EC2 instance using Docker, without
-  them interfering with each other. Use this skill whenever the user wants to deploy an app or service
-  to an EC2 instance, set up a new EC2 host as a Docker server, adopt/connect to an existing EC2 box
-  and deploy onto it, add a project to a shared server without breaking the apps already running there,
-  self-host a Next.js / Node / backend app on a single instance with a reverse proxy and TLS, or manage
-  that host's databases, secrets, and backups. Trigger this even when the user just says "deploy to my
-  server", "put this on my EC2", "set up my VPS", "I have an instance running other stuff, add this one",
-  or asks about Caddy + Docker, per-app isolation, database backups on a box, or restoring a host. Treats
-  the EC2 instance as a small self-hosting platform: shared Postgres/Mongo/Redis + reverse proxy, with
-  each app getting its own container, port, database, and secret namespace.
+  Deploy, host, and operate apps on a single AWS EC2 instance (or similar VPS) running Docker. Use this
+  whenever the user points at a specific server — by IP, SSH target, or instance ID — and wants to:
+  deploy a Next.js / Node / NestJS / backend app or service onto it, add a new app to a box already
+  running others without breaking them, see what's currently running, wire up a domain and TLS behind
+  Caddy or a reverse proxy, give each app its own database / host port / secrets, or set up
+  Postgres/Mongo/Redis backups (pg_dump, offsite to S3, restore drills) on that host. Also for standing
+  up a fresh EC2 Docker host from scratch. Covers casual phrasings like "deploy to my server", "put this
+  on my EC2", "set up my VPS", "add this app to my box". NOT for managed AWS (ECS, Fargate, EKS,
+  Kubernetes), local-only dev, writing a Dockerfile by itself, or cloud cost/billing questions.
 ---
 
 # EC2 as a single-host Docker platform
