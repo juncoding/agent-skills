@@ -1,0 +1,43 @@
+# Standard per-app deploy compose. Lives in the APP's repo at deploy/docker-compose.yml.
+# deploy-app.sh writes a .env beside it with APP / ENV / IMAGE / HOST_PORT, so you
+# never hard-code the host port here — that's the one value that must stay unique
+# per app, and it comes from the deploy script (allocate-port.sh), not the repo.
+#
+# Each app is its OWN Compose project (note `name:` and container_name) so that
+# `docker compose up -d --remove-orphans` only ever manages this app's containers
+# and can never touch a neighbor or the shared database stack.
+
+name: ${APP}-${ENV}
+
+services:
+  app:
+    image: ${IMAGE}
+    container_name: ${APP}-${ENV}
+    restart: unless-stopped
+    environment:
+      APP: ${APP}
+      ENV: ${ENV}                  # prod|staging — drives secret namespace, DB name, vhost, redis prefix
+      NODE_ENV: production         # ALWAYS production for deployed containers, even staging
+      # AWS-native secrets only: let the entrypoint reach SSM via the instance profile.
+      # AWS_REGION: ap-southeast-1
+      SKIP_MIGRATIONS: ${SKIP_MIGRATIONS:-0}
+    # Lightweight secrets: mount the host env file the entrypoint/compose reads.
+    # (Drop this block when using the SSM backend — the entrypoint pulls instead.)
+    env_file:
+      - /data/secrets/${APP}-${ENV}.env
+    ports:
+      # 127.0.0.1 only — never public. The reverse proxy is the only public door.
+      - "127.0.0.1:${HOST_PORT}:3000"
+    networks:
+      - infra_net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s            # headroom for migrate + app bootstrap before "unhealthy"
+
+networks:
+  infra_net:
+    external: true
+    name: infra_net

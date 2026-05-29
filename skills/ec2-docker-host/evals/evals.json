@@ -1,0 +1,54 @@
+{
+  "skill_name": "ec2-docker-host",
+  "notes": "Artifact-based evals: no live EC2. Each prompt provides the host state as if freshly discovered; the agent must produce a deploy plan + the concrete config artifacts/commands it would apply, without disturbing neighbors.",
+  "evals": [
+    {
+      "id": 0,
+      "name": "deploy-polyrepo-next-with-neighbors",
+      "prompt": "I've got an EC2 box at ubuntu@203.0.113.10 that already runs a couple of my apps, and I want to deploy a new standalone Next.js app called `acme` onto it (single Next.js repo, fullstack — it serves its own API routes) at acme.example.com.\n\nHere's the current state of the host from a look just now:\n- containers: `blog-prod` Up (image .../blog:main-abc123, published 127.0.0.1:3001->3000); `crm-prod` Up (published 127.0.0.1:3002->3000); shared `postgres`, `mongo`, `redis` all Up.\n- postgres databases: blog, crm\n- caddy (systemd) serving: blog.example.com, crm.example.com\n- DNS: wildcard *.example.com points at this host's IP\n- /data mounted, 40% full\n\nI do NOT want to disturb blog or crm. Note: I can't give you a live SSH session right now, so treat the state above as the authoritative discovery output. Walk me through deploying acme: give me the deploy plan and the exact config files + commands you'd apply.",
+      "expected_output": "A deploy plan that allocates host port 3003 (3001/3002 are taken), names the project/container acme-prod, creates database+role `acme`, defines a secret namespace for acme, adds an ADDITIVE caddy vhost for acme.example.com (no DNS change needed — wildcard), and flags this as a first deploy. A filled docker-compose.app.yml (127.0.0.1:3003:3000, joins infra_net, healthcheck), a caddy vhost block reverse_proxy 127.0.0.1:3003, and the command sequence in neighbor-safe order (db-create -> set secrets -> deploy-app -> add-vhost with validate-then-reload). Must NOT reuse 3001/3002 or edit blog/crm blocks.",
+      "files": [],
+      "assertions": [
+        "Allocates host port 3003 for acme and does NOT reuse the in-use ports 3001 or 3002",
+        "Creates a dedicated per-app Postgres database and role named acme (does not reuse blog/crm DBs)",
+        "Defines a per-app secret namespace/location for acme",
+        "Adds the caddy vhost additively and reloads (validate-then-reload, not restart); does not edit blog/crm vhost blocks",
+        "Generated app compose binds 127.0.0.1:3003->3000, joins the external infra_net network, and has a /health healthcheck",
+        "Generated caddy vhost reverse-proxies acme.example.com to 127.0.0.1:3003",
+        "Notes that no DNS change is needed because the wildcard *.example.com already covers acme.example.com",
+        "Command sequence is in neighbor-safe order: create DB -> set secrets -> deploy container -> add vhost + reload",
+        "Explicitly verifies the neighbors (blog and crm) remain up after the deploy"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "adopt-unknown-host-safely",
+      "prompt": "I have an EC2 instance (i-0abc123def456, ap-southeast-1) that a contractor set up a while ago — it's running some stuff for another project of mine and I really don't want to break it. I'd like to add a new backend service to it. Honestly I'm not 100% sure what's running on there anymore. How should I approach this safely, and what do you need from me to get started?",
+      "expected_output": "Adoption-mode response: asks for the connection details it needs (SSH user + key, or confirms it can resolve the public IP from the instance id), insists on a read-only discovery pass BEFORE any change, explains it will inventory containers/ports/DBs/proxy/volume, and states the cardinal rule that anything unrecognized is treated as a live neighbor and left untouched. Should NOT claim to have deployed anything or invent host state; should produce a safe step-by-step approach and the discovery command it would run.",
+      "files": [],
+      "assertions": [
+        "Asks for the connection details it needs (SSH user + key path), or states it can resolve the public IP from the instance id",
+        "Insists on a read-only discovery/inventory pass BEFORE making any change to the host",
+        "States the cardinal rule: anything unrecognized is treated as a live neighbor and left untouched (no stop/remove/restart/reconfigure)",
+        "Does NOT fabricate host state or claim to have already connected or deployed",
+        "Describes what discovery covers (running containers, used ports, shared databases, reverse proxy, data volume)"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "deploy-monorepo-web-and-api",
+      "prompt": "Deploy my monorepo to my EC2 host. The repo has apps/web (a Next.js frontend) and apps/api (a NestJS backend that talks to Postgres). The host is ubuntu@203.0.113.20 and it's fresh-ish — only the shared postgres/mongo/redis containers and caddy (systemd) are running, nothing else is deployed yet. Wildcard DNS *.acme.io points at it. I want the web app at app.acme.io and the api at api.acme.io. (I can't give you a live SSH session right now — treat the host state I described as the discovery output.) Give me the plan and the config/commands.",
+      "expected_output": "Recognizes the monorepo as TWO independent deployables, each its own app under the isolation invariants: web (port 3001, container web-prod, vhost app.acme.io) and api (port 3002, container api-prod, vhost api.acme.io), with the api getting its own postgres database+role and the web treated as a combined/standalone container (or backend-only) as appropriate. Produces a combined plan, two filled compose files, two additive caddy vhosts, and the command order. Makes a sensible call on whether web and api share a DB (api needs one; web may not). Does not deploy the monorepo as one blob.",
+      "files": [],
+      "assertions": [
+        "Treats the monorepo as TWO independent deployables (web and api), not one combined blob",
+        "Allocates distinct host ports for web and api (e.g. 3001 and 3002), each mapping to container port 3000",
+        "Each deployable gets its own Compose project / container name (e.g. web-prod and api-prod)",
+        "Creates a dedicated Postgres database + role for the api (which talks to Postgres)",
+        "Adds two additive caddy vhosts: app.acme.io -> web's port and api.acme.io -> api's port, via validate-then-reload",
+        "Produces a compose file per deployable binding 127.0.0.1:<port>->3000 on infra_net with a healthcheck",
+        "Makes a sensible call on databases (api needs one; web may not need its own) rather than blindly sharing"
+      ]
+    }
+  ]
+}

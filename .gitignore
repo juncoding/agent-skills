@@ -1,0 +1,12 @@
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# packaged skill bundles (built artifacts)
+*.skill
+
+# local env
+.env
+.env.*

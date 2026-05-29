@@ -1,0 +1,27 @@
+# Optional per-host connection + backend config. CONNECTION DETAILS ONLY —
+# the live state of the host (running apps, used ports, existing DBs) is always
+# discovered fresh with discover-host.sh, never read from a file that can drift.
+#
+# Copy to e.g. .ec2-host/host.yml in your project (gitignore it — it points at
+# infrastructure) or keep a central one per host. Nothing here is a secret.
+
+host:
+  name: shared-1                      # a friendly alias for this box
+  instance_id: i-0123456789abcdef0    # optional; resolve public IP from this
+  region: ap-southeast-1
+  ssh:
+    target: ubuntu@203.0.113.10       # <user>@<public-ip-or-dns>
+    key: ~/.ssh/my-ec2-key            # path to the private key (used as ssh -i)
+
+platform:
+  network: infra_net                  # shared docker bridge apps join
+  data_dir: /data                     # persistent volume mountpoint
+  proxy: caddy-systemd                # caddy-systemd | caddy-container | nginx | traefik | none
+  dns:
+    provider: route53                 # route53 | cloudflare | registrar | other
+    wildcard: "*.example.com"         # subdomains need no DNS change
+
+backends:                             # the four pluggable pieces
+  registry: ghcr                      # ghcr | dockerhub | ecr | harbor | ...
+  secrets: file                       # file (/data/secrets/<app>-<env>.env) | ssm | vault | ...
+  backup_target: s3://my-backups/host-shared-1

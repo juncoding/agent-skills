@@ -1,0 +1,30 @@
+# One additive vhost block per app. Append; never edit a neighbor's block.
+# TLS is automatic per-FQDN via Let's Encrypt — nothing to configure here.
+# Pick ONE shape per FQDN.
+
+# --- Shape A: combined container or backend-only (reverse proxy to a host port) ---
+app.example.com {
+	reverse_proxy 127.0.0.1:3001      # <- the app's unique host port from allocate-port.sh
+	encode gzip zstd
+}
+
+# --- Shape B: backend on an api subdomain; frontend hosted elsewhere (Vercel/CDN) ---
+# api.example.com {
+# 	reverse_proxy 127.0.0.1:3001
+# 	encode gzip zstd
+# }
+# (The frontend host gets only a CNAME; the proxy isn't involved in serving it.)
+
+# --- Shape C: host-served static frontend (built assets in a release dir) ---
+# static.example.com {
+# 	root * /home/ubuntu/apps/myapp-prod/current   # symlink flipped atomically per release
+# 	file_server
+# 	encode gzip zstd
+# }
+
+# --- Custom apex domain (NOT a subdomain of your wildcard) ---
+# Needs its own A record at that domain's registrar -> the host's Elastic IP.
+# myapp.com {
+# 	reverse_proxy 127.0.0.1:3003
+# 	encode gzip zstd
+# }
