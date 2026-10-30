@@ -6,7 +6,7 @@
 
 fetch() { # fetch <s3-key> → local path
   local f; f="$EDH_DATA_DIR/backups/restore-$(basename "$1")"
-  if [[ ! -s "$f" ]]; then aws s3 cp "s3://$EDH_BACKUP_BUCKET/$1" "$f" --region "$EDH_REGION" --only-show-errors; fi
+  if [[ ! -s "$f" ]]; then ( umask 077; aws s3 cp "s3://$EDH_BACKUP_BUCKET/$1" "$f" --region "$EDH_REGION" --only-show-errors ); fi
   printf '%s' "$f"
 }
 restore_into() { # restore_into <database> <dump-file>

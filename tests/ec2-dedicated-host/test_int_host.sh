@@ -85,8 +85,11 @@ make_release "$T/r2" "exit 3"
 assert_status "$(deploy "$T/r2" edh-fixture:bad)" 1 "failed migration exits 1"
 assert_eq "$(img)" "edh-fixture:good" "failed migration keeps old image"
 
+chmod 755 "$T/data/backups"   # an existing, too-open directory gets tightened by the backup
 name=$(bash "$EDH_BIN_DIR/edh-backup.sh" --tag manual --force 2>/dev/null)
 assert_contains "$(ls "$STUB_S3/bkt/db/daily")" "$name" "manual backup uploaded to db/daily"
+assert_eq "$(stat -f %Lp "$T/data/backups/$name" 2>&1)" "600" "backup dump is 0600"
+assert_eq "$(stat -f %Lp "$T/data/backups")" "700" "backups directory is 0700"
 assert_contains "$(cat "$STUB_LOG")" "put-metric-data" "backup metric published"
 assert_eq "$(bash "$EDH_BIN_DIR/edh-restore.sh" check "db/daily/$name" 2>/dev/null)" "1" "restore check finds 1 table"
 assert_eq "$(bash "$EDH_BIN_DIR/edh-drill.sh" >/dev/null 2>&1; echo $?)" "0" "restore drill passes"

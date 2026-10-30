@@ -29,7 +29,10 @@ fi
 
 name="app-$(date -u +%Y%m%dT%H%M%SZ).dump"
 file="$EDH_DATA_DIR/backups/$name"
+# dumps are owner-only: directory 0700 (tightened if it already exists), files 0600
 mkdir -p "$EDH_DATA_DIR/backups"
+chmod 700 "$EDH_DATA_DIR/backups"
+umask 077
 dc exec -T postgres pg_dump -U app -d app -Fc > "$file.part"
 mv "$file.part" "$file"
 [[ -s "$file" ]] || die "pg_dump produced an empty file"
