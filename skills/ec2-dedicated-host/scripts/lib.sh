@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Shared helpers for ec2-dedicated-host local scripts (run on the operator's machine). Source, don't run.
 # Must stay compatible with macOS bash 3.2.
-# shellcheck disable=SC2034  # EDH_* globals set here are read by the scripts that source this file.
 set -euo pipefail
 
+# shellcheck disable=SC2034  # read by the scripts that source this file
 EDH_SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*" >&2; }
@@ -18,15 +18,18 @@ cfg_get() {
   val=$(awk -v k="$key" '
     BEGIN { q = sprintf("%c", 39) }
     $0 ~ "^" k ":" {
-      sub("^" k ":[ \t]*", ""); sub(/\r$/, ""); sub(/[ \t]+#.*$/, ""); sub(/[ \t]+$/, "")
-      f = substr($0, 1, 1)
-      if ((f == "\"" || f == q) && length($0) >= 2) $0 = substr($0, 2, length($0) - 2)
+      sub("^" k ":[ \t]*", ""); sub(/\r$/, "")
+      if (substr($0, 1, 1) == "#") $0 = ""          # `key:   # comment` means empty
+      sub(/[ \t]+#.*$/, ""); sub(/[ \t]+$/, "")
+      f = substr($0, 1, 1); l = substr($0, length($0), 1)
+      if ((f == "\"" || f == q) && f == l && length($0) >= 2) $0 = substr($0, 2, length($0) - 2)
       print; exit
     }' "$file")
   printf '%s' "${val:-$def}"
 }
 
 # load_config [path] — read deploy.yml into EDH_* variables and validate them.
+# shellcheck disable=SC2034  # EDH_* globals set here are read by the scripts that source this file.
 load_config() {
   local f="${1:-deploy/deploy.yml}"
   [[ -f "$f" ]] || die "config not found: $f (run from the project root, or create it with init.sh)"
@@ -34,6 +37,7 @@ load_config() {
   EDH_CLIENT=$(cfg_get "$f" client)
   EDH_ENV=$(cfg_get "$f" env prod)
   EDH_REGION=$(cfg_get "$f" region ap-southeast-1)
+  EDH_ACCOUNT_ID=$(cfg_get "$f" account_id "")
   EDH_DOMAIN=$(cfg_get "$f" domain)
   EDH_ALERT_EMAILS=$(cfg_get "$f" alert_emails)
   EDH_MONITORING=$(cfg_get "$f" monitoring cloudwatch)
@@ -55,16 +59,21 @@ load_config() {
 }
 
 validate_config() {
-  [[ "$EDH_CLIENT" =~ ^[a-z][a-z0-9-]{1,20}$ ]] || die "client must be 2-21 lowercase letters/digits/dashes: '$EDH_CLIENT'"
+  [[ "$EDH_CLIENT" =~ ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ ]] && (( ${#EDH_CLIENT} >= 2 && ${#EDH_CLIENT} <= 21 )) \
+    || die "client must be 2-21 lowercase letters/digits, single dashes between them: '$EDH_CLIENT'"
   [[ "$EDH_ENV" =~ ^[a-z][a-z0-9]{1,9}$ ]] || die "env must be 2-10 lowercase letters/digits: '$EDH_ENV'"
+  [[ -z "$EDH_ACCOUNT_ID" || "$EDH_ACCOUNT_ID" =~ ^[0-9]{12}$ ]] || die "account_id must be empty or a 12-digit AWS account id: '$EDH_ACCOUNT_ID'"
   [[ "$EDH_DOMAIN" =~ ^[a-z0-9.-]+\.[a-z]{2,}$ ]] || die "domain looks invalid: '$EDH_DOMAIN'"
   [[ "$EDH_MONITORING" == cloudwatch || "$EDH_MONITORING" == none ]] || die "monitoring must be cloudwatch or none"
   [[ "$EDH_BACKUP_SCHEDULE" =~ ^(auto|hourly|daily)$ ]] || die "backup_schedule must be auto, hourly or daily"
   [[ "$EDH_USES_GOTENBERG" == true || "$EDH_USES_GOTENBERG" == false ]] || die "uses_gotenberg must be true or false"
-  [[ "$EDH_DATA_GB" =~ ^[0-9]+$ ]] && (( EDH_DATA_GB >= 8 )) || die "data_volume_gb must be a number >= 8"
-  [[ "$EDH_APP_MEMORY_MB" =~ ^[0-9]+$ ]] || die "app_memory_mb must be a number"
-  [[ "$EDH_APP_PORT" =~ ^[0-9]+$ ]] || die "app_port must be a number"
-  [[ "$EDH_DAILY_HOUR_UTC" =~ ^[0-9]+$ ]] && (( EDH_DAILY_HOUR_UTC < 24 )) || die "daily_backup_hour_utc must be 0-23"
+  [[ "$EDH_INSTANCE_TYPE" == auto || "$EDH_INSTANCE_TYPE" =~ ^[a-z][a-z0-9]*\.[a-z0-9]+$ ]] \
+    || die "instance_type must be auto or an EC2 type like t4g.small: '$EDH_INSTANCE_TYPE'"
+  [[ "$EDH_DATA_GB" =~ ^[0-9]+$ ]] && (( 10#$EDH_DATA_GB >= 8 )) || die "data_volume_gb must be a number >= 8"
+  [[ "$EDH_APP_MEMORY_MB" =~ ^[0-9]+$ ]] && (( 10#$EDH_APP_MEMORY_MB > 0 )) || die "app_memory_mb must be a number > 0"
+  [[ "$EDH_APP_PORT" =~ ^[0-9]{1,5}$ ]] && (( 10#$EDH_APP_PORT >= 1 && 10#$EDH_APP_PORT <= 65535 )) || die "app_port must be 1-65535"
+  [[ "$EDH_DAILY_HOUR_UTC" =~ ^[0-9]{1,2}$ ]] && (( 10#$EDH_DAILY_HOUR_UTC < 24 )) || die "daily_backup_hour_utc must be 0-23"
+  EDH_DAILY_HOUR_UTC=$((10#$EDH_DAILY_HOUR_UTC))   # "09" -> 9
   [[ "$EDH_MIGRATE_CMD" != *"'"* ]] || die "migrate_cmd must not contain single quotes"
   if [[ "$EDH_MONITORING" == cloudwatch && -z "$EDH_ALERT_EMAILS" ]]; then
     die "alert_emails required when monitoring: cloudwatch"
@@ -74,9 +83,29 @@ validate_config() {
 awsr()    { aws --region "$EDH_REGION" "$@"; }        # app region
 aws_use1() { aws --region us-east-1 "$@"; }           # Route 53 health-check metrics live in us-east-1
 
+# aws_account — 12-digit account id of the current credentials; dies if it can't be read.
+# Cached in EDH_ACCOUNT, but the cache only lives in the shell that calls it: do ACCT=$(aws_account) once
+# at top level and reuse $ACCT. Never inline $(aws_account) inside another command's arguments, where a
+# failure would not stop the script.
 aws_account() {
-  if [[ -z "${EDH_ACCOUNT:-}" ]]; then EDH_ACCOUNT=$(aws sts get-caller-identity --query Account --output text); fi
+  if [[ -z "${EDH_ACCOUNT:-}" ]]; then
+    EDH_ACCOUNT=$(aws sts get-caller-identity --query Account --output text) || die "cannot read AWS account (check credentials/profile)"
+    [[ "$EDH_ACCOUNT" =~ ^[0-9]{12}$ ]] || die "AWS account is not a 12-digit id: '$EDH_ACCOUNT'"
+  fi
   printf '%s' "$EDH_ACCOUNT"
+}
+
+# require_account — refuse to run against any account but deploy.yml's account_id (warns once if unset).
+require_account() {
+  aws_account >/dev/null   # in this shell, so EDH_ACCOUNT is cached
+  if [[ -z "$EDH_ACCOUNT_ID" ]]; then
+    if [[ -z "${EDH_ACCOUNT_WARNED:-}" ]]; then
+      warn "deploy.yml has no account_id; set account_id: $EDH_ACCOUNT so scripts refuse any other AWS account"
+      EDH_ACCOUNT_WARNED=1
+    fi
+    return 0
+  fi
+  [[ "$EDH_ACCOUNT" == "$EDH_ACCOUNT_ID" ]] || die "AWS credentials are for account $EDH_ACCOUNT but deploy.yml says $EDH_ACCOUNT_ID"
 }
 
 # tag_spec <resource-type> <name> [Key=Value ...] — value for --tag-specifications
@@ -87,10 +116,13 @@ tag_spec() {
     "$rtype" "$name" "$EDH_CLIENT" "$EDH_ENV" "$EDH_CLIENT" "$extra"
 }
 
-# guard_not_protected <ec2-resource-id> — never touch anything tagged Protect=true.
+# guard_not_protected <ec2-resource-id> — never touch anything tagged Protect=true (any case).
+# Refuses as well when the tags can't be read.
 guard_not_protected() {
   local v
-  v=$(awsr ec2 describe-tags --filters "Name=resource-id,Values=$1" "Name=key,Values=Protect" --query 'Tags[0].Value' --output text)
+  v=$(awsr ec2 describe-tags --filters "Name=resource-id,Values=$1" "Name=key,Values=Protect" --query 'Tags[0].Value' --output text) \
+    || die "refusing: cannot read tags of $1 to check Protect=true"
+  v=$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')
   [[ "$v" != true ]] || die "refusing: $1 is tagged Protect=true (it holds data). Remove the tag by hand only if you really mean it."
 }
 
@@ -99,10 +131,16 @@ confirm() {
   local a=""
   if [[ "${EDH_YES:-}" == 1 ]]; then return 0; fi
   read -r -p "$1 [y/N] " a || true
-  [[ "$a" =~ ^[Yy]$ ]] || die "aborted"
+  a=$(printf '%s' "$a" | tr '[:upper:]' '[:lower:]')
+  [[ "$a" == y || "$a" == yes ]] || die "aborted"
 }
 
-gen_secret() { openssl rand -hex 32 | cut -c1-"${1:-40}"; }
+# gen_secret [length] — random hex string, 1-64 characters (default 40).
+gen_secret() {
+  local n="${1:-40}"
+  [[ "$n" =~ ^[0-9]+$ ]] && (( n >= 1 && n <= 64 )) || die "gen_secret: length must be 1-64, got '$n'"
+  openssl rand -hex 32 | cut -c1-"$n"
+}
 
 instance_id() {
   awsr ec2 describe-instances \
@@ -118,17 +156,27 @@ require_instance() {
 }
 
 # ssm_run <instance-id> <timeout-seconds> <script> — run a bash script on the server as root.
-# The script travels base64-encoded, so no quoting issues. Prints its output; returns its exit code.
+# The script travels base64-encoded, so no quoting issues. Prints its output; returns its exit code,
+# or 124 if the command hasn't finished by timeout + 120 s.
+# The script body is visible in SSM command history: never put secrets in it (have it read them from SSM).
+# SSM keeps only the first 24,000 characters of output; write anything longer to a file.
+# EDH_SSM_POLL_SECONDS overrides the 3 s poll interval (tests).
 ssm_run() {
   local iid="$1" timeout="$2" b64 cid status code err
+  local deadline=$((SECONDS + timeout + 120))
   b64=$(printf '%s' "$3" | base64 | tr -d '\n')
   cid=$(awsr ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript \
     --parameters "{\"commands\":[\"f=\$(mktemp); echo $b64 | base64 -d > \$f; bash \$f; rc=\$?; rm -f \$f; exit \$rc\"],\"executionTimeout\":[\"$timeout\"]}" \
-    --timeout-seconds 60 --query Command.CommandId --output text)
+    --timeout-seconds 60 --query Command.CommandId --output text) || die "send-command to $iid failed"
+  [[ -n "$cid" && "$cid" != None ]] || die "send-command to $iid returned no command id"
   while :; do
-    sleep 3
-    status=$(awsr ssm get-command-invocation --command-id "$cid" --instance-id "$iid" --query Status --output text 2>/dev/null || echo Pending)
-    case "$status" in Pending|InProgress|Delayed) ;; *) break ;; esac
+    sleep "${EDH_SSM_POLL_SECONDS:-3}"
+    status=$(awsr ssm get-command-invocation --command-id "$cid" --instance-id "$iid" --query Status --output text 2>/dev/null) || status=Pending
+    case "$status" in Pending|InProgress|Delayed|Cancelling) ;; *) break ;; esac
+    if (( SECONDS > deadline )); then
+      warn "SSM command $cid on $iid is still $status after $((timeout + 120)) s; giving up waiting"
+      return 124
+    fi
   done
   awsr ssm get-command-invocation --command-id "$cid" --instance-id "$iid" --query StandardOutputContent --output text
   err=$(awsr ssm get-command-invocation --command-id "$cid" --instance-id "$iid" --query StandardErrorContent --output text)
@@ -140,8 +188,8 @@ ssm_run() {
 
 # wait_ssm <instance-id> — until the SSM agent reports Online (max 10 min)
 wait_ssm() {
-  local i
-  for i in $(seq 1 60); do
+  local _
+  for _ in $(seq 1 60); do
     if [[ $(awsr ssm describe-instance-information --filters "Key=InstanceIds,Values=$1" \
            --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null) == Online ]]; then return 0; fi
     sleep 10

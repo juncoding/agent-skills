@@ -11,7 +11,9 @@ svc="${clean[0]:-}"; verb="${clean[1]:-}"
 s3path() { if [[ "$1" == s3://* ]]; then echo "${STUB_S3:?}/${1#s3://}"; else echo "$1"; fi; }
 
 case "$svc $verb" in
-  "sts get-caller-identity") echo 123456789012 ;;
+  "sts get-caller-identity")
+    if [[ -n "${STUB_STS_FAIL:-}" ]]; then echo "stub: sts failure" >&2; exit 255; fi
+    echo "${STUB_ACCOUNT:-123456789012}" ;;
   "s3 cp")
     pos=(); for a in "${clean[@]:2}"; do [[ "$a" == --* ]] || pos+=("$a"); done
     src=$(s3path "${pos[0]}"); dst=$(s3path "${pos[1]}")
@@ -20,10 +22,34 @@ case "$svc $verb" in
     else mkdir -p "$(dirname "$dst")"; cp "$src" "$dst"; fi ;;
   "s3 ls")
     p="${clean[2]#s3://}"; b="${p%%/*}"
-    [[ -d "$STUB_S3/$b" ]] && (cd "$STUB_S3/$b" && find . -type f | sed 's#^\./##' | sort | while read -r k; do echo "2026-01-01 00:00:00 1 $k"; done) ;;
+    [[ -d "$STUB_S3/$b" ]] && (cd "$STUB_S3/$b" || exit; find . -type f | sed 's#^\./##' | sort | while read -r k; do echo "2026-01-01 00:00:00 1 $k"; done) ;;
   "ssm get-parameters-by-path") cat "${STUB_SSM:-/dev/null}" ;;
+  "ssm send-command")
+    # STUB_SSM_SEND_FAIL=1 fails; otherwise the --parameters JSON is saved to $STUB_LOG.ssm-params
+    if [[ "${STUB_SSM_SEND_FAIL:-}" == 1 ]]; then echo "stub: send-command failure" >&2; exit 255; fi
+    i=0
+    while (( i < ${#clean[@]} )); do
+      if [[ "${clean[$i]}" == --parameters ]]; then printf '%s\n' "${clean[$((i + 1))]}" > "$STUB_LOG.ssm-params"; fi
+      i=$((i + 1))
+    done
+    echo cmd-stub ;;
+  "ssm get-command-invocation")
+    # answers by --query: the command always succeeds; its output is the script that was sent
+    case "$*" in
+      *"--query StandardOutputContent"*)
+        b64=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' "$STUB_LOG.ssm-params" 2>/dev/null || true)
+        if [[ -n "$b64" ]]; then printf '%s' "$b64" | base64 --decode; echo; else echo stub-output; fi ;;
+      *"--query StandardErrorContent"*) echo None ;;
+      *"--query ResponseCode"*) echo "${STUB_SSM_RC:-0}" ;;
+      *) echo Success ;;
+    esac ;;
   "ec2 describe-tags")
-    if [[ "$*" == *"vol-protected"* ]]; then echo true; else echo None; fi ;;
+    case "$*" in
+      *vol-error*) echo "stub: describe-tags failure" >&2; exit 255 ;;
+      *vol-protected*) echo true ;;
+      *vol-upper*) echo TRUE ;;
+      *) echo None ;;
+    esac ;;
   "ecr get-login-password") echo stub ;;
   *)
     if [[ "${STUB_MODE:-empty}" == empty ]]; then

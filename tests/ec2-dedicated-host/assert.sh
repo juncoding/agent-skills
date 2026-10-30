@@ -15,3 +15,10 @@ SKILL_DIR="$REPO_DIR/skills/ec2-dedicated-host"
 # Always exercise scripts with the system bash (3.2 on macOS), even if a newer bash is first on PATH,
 # so a bash-4-only feature in scripts/*.sh fails here instead of on a user's Mac.
 bash() { /bin/bash "$@"; }
+
+# Fence off real AWS for every test: `aws` resolves to the stub, and even if a test bypassed it,
+# the real CLI would find no config, no credentials, no profile and no instance metadata.
+export PATH="$TESTS_DIR/stubs:$PATH"
+export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null
+export AWS_PROFILE=edh-test-none AWS_EC2_METADATA_DISABLED=true
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_DEFAULT_PROFILE

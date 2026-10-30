@@ -1,7 +1,8 @@
-# ec2-dedicated-host settings for this project. Flat `key: value` only (no nesting, no lists).
+# ec2-dedicated-host settings for this project. Flat `key: value` only (no nesting, no lists, no `#` inside values).
 client: acme                 # lowercase letters/digits/dashes; names every AWS resource
 env: prod
 region: ap-southeast-1
+account_id: ""               # 12-digit AWS account this project deploys to; scripts refuse any other
 domain: app.example.com      # A record must point at the server's Elastic IP
 alert_emails: ops@example.com            # comma-separated; required when monitoring: cloudwatch
 monitoring: cloudwatch       # cloudwatch | none
