@@ -51,6 +51,17 @@ load_config() {
   EDH_MIGRATE_CMD=$(cfg_get "$f" migrate_cmd "")
   EDH_DOCKERFILE=$(cfg_get "$f" dockerfile Dockerfile)
   EDH_BUILD_CONTEXT=$(cfg_get "$f" build_context .)
+  # cfg_get strips matched quotes only, so a value still starting with a quote was never closed.
+  local kv var
+  for kv in client:EDH_CLIENT env:EDH_ENV region:EDH_REGION account_id:EDH_ACCOUNT_ID domain:EDH_DOMAIN \
+            alert_emails:EDH_ALERT_EMAILS monitoring:EDH_MONITORING instance_type:EDH_INSTANCE_TYPE \
+            data_volume_gb:EDH_DATA_GB app_port:EDH_APP_PORT app_memory_mb:EDH_APP_MEMORY_MB \
+            uses_gotenberg:EDH_USES_GOTENBERG backup_schedule:EDH_BACKUP_SCHEDULE \
+            daily_backup_hour_utc:EDH_DAILY_HOUR_UTC migrate_cmd:EDH_MIGRATE_CMD dockerfile:EDH_DOCKERFILE \
+            build_context:EDH_BUILD_CONTEXT; do
+    var="${kv#*:}"
+    case "${!var}" in \"*|\'*) die "unclosed quote in ${kv%%:*}" ;; esac
+  done
   validate_config
   EDH_NAME="${EDH_CLIENT}-${EDH_ENV}"
   EDH_PREFIX="edh-${EDH_NAME}"
@@ -67,13 +78,17 @@ validate_config() {
   [[ "$EDH_MONITORING" == cloudwatch || "$EDH_MONITORING" == none ]] || die "monitoring must be cloudwatch or none"
   [[ "$EDH_BACKUP_SCHEDULE" =~ ^(auto|hourly|daily)$ ]] || die "backup_schedule must be auto, hourly or daily"
   [[ "$EDH_USES_GOTENBERG" == true || "$EDH_USES_GOTENBERG" == false ]] || die "uses_gotenberg must be true or false"
-  [[ "$EDH_INSTANCE_TYPE" == auto || "$EDH_INSTANCE_TYPE" =~ ^[a-z][a-z0-9]*\.[a-z0-9]+$ ]] \
+  [[ "$EDH_INSTANCE_TYPE" == auto || "$EDH_INSTANCE_TYPE" =~ ^[a-z][a-z0-9-]*\.[a-z0-9]+$ ]] \
     || die "instance_type must be auto or an EC2 type like t4g.small: '$EDH_INSTANCE_TYPE'"
   [[ "$EDH_DATA_GB" =~ ^[0-9]+$ ]] && (( 10#$EDH_DATA_GB >= 8 )) || die "data_volume_gb must be a number >= 8"
   [[ "$EDH_APP_MEMORY_MB" =~ ^[0-9]+$ ]] && (( 10#$EDH_APP_MEMORY_MB > 0 )) || die "app_memory_mb must be a number > 0"
   [[ "$EDH_APP_PORT" =~ ^[0-9]{1,5}$ ]] && (( 10#$EDH_APP_PORT >= 1 && 10#$EDH_APP_PORT <= 65535 )) || die "app_port must be 1-65535"
   [[ "$EDH_DAILY_HOUR_UTC" =~ ^[0-9]{1,2}$ ]] && (( 10#$EDH_DAILY_HOUR_UTC < 24 )) || die "daily_backup_hour_utc must be 0-23"
-  EDH_DAILY_HOUR_UTC=$((10#$EDH_DAILY_HOUR_UTC))   # "09" -> 9
+  # normalise numbers now they are known to be valid: "09" -> 9, "0768" -> 768
+  EDH_DATA_GB=$((10#$EDH_DATA_GB))
+  EDH_APP_MEMORY_MB=$((10#$EDH_APP_MEMORY_MB))
+  EDH_APP_PORT=$((10#$EDH_APP_PORT))
+  EDH_DAILY_HOUR_UTC=$((10#$EDH_DAILY_HOUR_UTC))
   [[ "$EDH_MIGRATE_CMD" != *"'"* ]] || die "migrate_cmd must not contain single quotes"
   if [[ "$EDH_MONITORING" == cloudwatch && -z "$EDH_ALERT_EMAILS" ]]; then
     die "alert_emails required when monitoring: cloudwatch"
@@ -97,6 +112,7 @@ aws_account() {
 
 # require_account — refuse to run against any account but deploy.yml's account_id (warns once if unset).
 require_account() {
+  EDH_ACCOUNT=""           # always ask STS: a pre-set EDH_ACCOUNT must not get past this check
   aws_account >/dev/null   # in this shell, so EDH_ACCOUNT is cached
   if [[ -z "$EDH_ACCOUNT_ID" ]]; then
     if [[ -z "${EDH_ACCOUNT_WARNED:-}" ]]; then
@@ -161,23 +177,40 @@ require_instance() {
 # The script body is visible in SSM command history: never put secrets in it (have it read them from SSM).
 # SSM keeps only the first 24,000 characters of output; write anything longer to a file.
 # EDH_SSM_POLL_SECONDS overrides the 3 s poll interval (tests).
+# Dies if polling fails 10 times in a row (other than InvocationDoesNotExist, which just means "not yet").
 ssm_run() {
-  local iid="$1" timeout="$2" b64 cid status code err
+  local iid="$1" timeout="$2" b64 cid status code err errf fails=0
   local deadline=$((SECONDS + timeout + 120))
   b64=$(printf '%s' "$3" | base64 | tr -d '\n')
   cid=$(awsr ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript \
     --parameters "{\"commands\":[\"f=\$(mktemp); echo $b64 | base64 -d > \$f; bash \$f; rc=\$?; rm -f \$f; exit \$rc\"],\"executionTimeout\":[\"$timeout\"]}" \
     --timeout-seconds 60 --query Command.CommandId --output text) || die "send-command to $iid failed"
   [[ -n "$cid" && "$cid" != None ]] || die "send-command to $iid returned no command id"
+  errf=$(mktemp)
   while :; do
     sleep "${EDH_SSM_POLL_SECONDS:-3}"
-    status=$(awsr ssm get-command-invocation --command-id "$cid" --instance-id "$iid" --query Status --output text 2>/dev/null) || status=Pending
+    if status=$(awsr ssm get-command-invocation --command-id "$cid" --instance-id "$iid" --query Status --output text 2>"$errf"); then
+      fails=0
+    else
+      status=Pending
+      if grep -q InvocationDoesNotExist "$errf"; then
+        fails=0
+      else
+        fails=$((fails + 1))
+        if (( fails >= 10 )); then
+          err=$(cat "$errf"); rm -f "$errf"
+          die "polling SSM command $cid on $iid failed 10 times in a row; last error: $err"
+        fi
+      fi
+    fi
     case "$status" in Pending|InProgress|Delayed|Cancelling) ;; *) break ;; esac
     if (( SECONDS > deadline )); then
+      rm -f "$errf"
       warn "SSM command $cid on $iid is still $status after $((timeout + 120)) s; giving up waiting"
       return 124
     fi
   done
+  rm -f "$errf"
   awsr ssm get-command-invocation --command-id "$cid" --instance-id "$iid" --query StandardOutputContent --output text
   err=$(awsr ssm get-command-invocation --command-id "$cid" --instance-id "$iid" --query StandardErrorContent --output text)
   if [[ -n "$err" && "$err" != None ]]; then printf '%s\n' "$err" >&2; fi

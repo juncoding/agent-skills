@@ -43,6 +43,9 @@ assert_eq "$(runf "$T/match.yml" 'require_account; echo passed')" "passed" "requ
 out=$(runf "$T/other.yml" 'require_account; echo passed')
 assert_contains "$out" "AWS credentials are for account 123456789012 but deploy.yml says 111111111111" "require_account refuses other account"
 assert_not_contains "$out" "passed" "account mismatch does not continue"
+out=$(EDH_ACCOUNT=111111111111 runf "$T/other.yml" 'require_account; echo passed')
+assert_contains "$out" "AWS credentials are for account 123456789012 but deploy.yml says 111111111111" "pre-set EDH_ACCOUNT can't bypass the account check"
+assert_not_contains "$out" "passed" "pre-set EDH_ACCOUNT mismatch does not continue"
 out=$(run 'require_account; require_account; echo passed')
 assert_contains "$out" "passed" "require_account without account_id continues"
 n=$(printf '%s\n' "$out" | grep -c "account_id")

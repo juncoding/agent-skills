@@ -51,9 +51,21 @@ assert_contains "$(load "$(with client my-co2)")" "my-co2-prod|" "accepts dashed
 # --- instance_type, app_port, app_memory_mb
 assert_eq "$(loadv "$(with instance_type t4g.large)" EDH_INSTANCE_TYPE)" "t4g.large" "accepts explicit instance_type"
 assert_contains "$(load "$(with instance_type big)")" "instance_type must be" "rejects malformed instance_type"
+assert_eq "$(loadv "$(with instance_type c7i-flex.large)" EDH_INSTANCE_TYPE)" "c7i-flex.large" "accepts dashed family (c7i-flex.large)"
 assert_contains "$(load "$(with app_port 0)")" "app_port must be" "rejects port 0"
 assert_contains "$(load "$(with app_port 70000)")" "app_port must be" "rejects port > 65535"
 assert_contains "$(load "$(with app_memory_mb 0)")" "app_memory_mb must be" "rejects zero memory"
+
+# --- number settings are normalised after validation (leading zeros dropped)
+assert_eq "$(loadv "$(with app_memory_mb 0768)" EDH_APP_MEMORY_MB)" "768" "app_memory_mb 0768 normalised to 768"
+assert_eq "$(loadv "$(with data_volume_gb 020)" EDH_DATA_GB)" "20" "data_volume_gb 020 normalised to 20"
+assert_eq "$(loadv "$(with app_port 08080)" EDH_APP_PORT)" "8080" "app_port 08080 normalised to 8080"
+
+# --- unclosed quotes
+out=$(load "$(with migrate_cmd '"npm run x # y')")
+assert_contains "$out" "unclosed quote in migrate_cmd" "rejects unclosed quote in a value"
+assert_not_contains "$out" "acme-prod|" "unclosed quote stops load_config"
+assert_contains "$(load "$(with client "'acme")")" "unclosed quote in client" "rejects unclosed single quote"
 
 # --- daily_backup_hour_utc
 assert_eq "$(loadv "$(with daily_backup_hour_utc 09)" EDH_DAILY_HOUR_UTC)" "9" "hour 09 normalised to 9"

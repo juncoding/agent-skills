@@ -34,4 +34,23 @@ assert_contains "$out" "send-command to i-stub failed" "failed send-command dies
 assert_not_contains "$out" "continued" "failed send-command stops the script"
 assert_not_contains "$out" "rc=143" "failed send-command does not loop until killed"
 assert_eq "$(( SECONDS - start < 10 ))" "1" "failed send-command returns quickly"
+
+# --- polling errors (STUB_SSM_POLL_FAIL=<n>: the first n Status polls fail with STUB_SSM_POLL_ERR)
+rm -f "$STUB_LOG.polls"
+out=$(STUB_SSM_POLL_FAIL=1000 STUB_SSM_POLL_ERR="An error occurred (AccessDeniedException): not allowed" \
+      guarded 20 'ssm_run i-stub 60 "echo hi"; echo continued')
+assert_contains "$out" "AccessDeniedException" "repeated poll errors die showing the last error"
+assert_not_contains "$out" "continued" "repeated poll errors stop the script"
+assert_not_contains "$out" "rc=143" "repeated poll errors do not loop until killed"
+assert_eq "$(cat "$STUB_LOG.polls")" "10" "gives up after 10 failed polls in a row"
+
+rm -f "$STUB_LOG.polls"
+out=$(STUB_SSM_POLL_FAIL=9 STUB_SSM_POLL_ERR="An error occurred (ThrottlingException): slow down" \
+      guarded 20 'ssm_run i-stub 60 "echo hi"')
+assert_contains "$out" "rc=0" "fewer than 10 poll errors in a row are tolerated"
+
+rm -f "$STUB_LOG.polls"
+out=$(STUB_SSM_POLL_FAIL=15 STUB_SSM_POLL_ERR="An error occurred (InvocationDoesNotExist) when calling GetCommandInvocation" \
+      guarded 20 'ssm_run i-stub 60 "echo hi"')
+assert_contains "$out" "rc=0" "InvocationDoesNotExist keeps waiting and is not counted as an error"
 finish

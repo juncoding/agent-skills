@@ -34,7 +34,15 @@ case "$svc $verb" in
     done
     echo cmd-stub ;;
   "ssm get-command-invocation")
-    # answers by --query: the command always succeeds; its output is the script that was sent
+    # answers by --query: the command always succeeds; its output is the script that was sent.
+    # STUB_SSM_POLL_FAIL=<n>: the first n Status polls fail with STUB_SSM_POLL_ERR (count kept in $STUB_LOG.polls)
+    if [[ -n "${STUB_SSM_POLL_FAIL:-}" && "$*" == *"--query Status"* ]]; then
+      n=$(cat "$STUB_LOG.polls" 2>/dev/null || echo 0)
+      if (( n < STUB_SSM_POLL_FAIL )); then
+        echo $((n + 1)) > "$STUB_LOG.polls"
+        echo "${STUB_SSM_POLL_ERR:-stub: poll failure}" >&2; exit 255
+      fi
+    fi
     case "$*" in
       *"--query StandardOutputContent"*)
         b64=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' "$STUB_LOG.ssm-params" 2>/dev/null || true)
