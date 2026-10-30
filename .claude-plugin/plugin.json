@@ -1,7 +1,7 @@
 {
   "name": "agent-skills",
-  "description": "Open-source agent skills for shipping and operating real infrastructure. First skill: ec2-docker-host — run many independent apps side-by-side on one AWS EC2 box with Docker, a shared reverse proxy + databases, and backups, without the apps interfering with each other.",
-  "version": "0.1.0",
+  "description": "Open-source agent skills for shipping and operating real infrastructure. Skills: ec2-docker-host (many apps on one server) and ec2-dedicated-host (one client per server).",
+  "version": "0.2.0",
   "author": {
     "name": "Bill Zhou"
   },
@@ -15,6 +15,9 @@
     "deployment",
     "reverse-proxy",
     "claude-code",
-    "agent-skills"
+    "agent-skills",
+    "dedicated",
+    "backups",
+    "monitoring"
   ]
 }

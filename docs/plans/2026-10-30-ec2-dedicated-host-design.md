@@ -1,7 +1,7 @@
 # ec2-dedicated-host — design
 
 Date: 2026-10-30
-Status: design validated, not yet implemented
+Status: implemented; live AWS validation pending
 
 ## Purpose
 
@@ -206,15 +206,63 @@ skills/ec2-dedicated-host/
 
 ## Validation plan
 
-1. Deploy a test app to a fresh t4g.small with the skill.
-2. Exercise everything:
-   - maintenance on/off and the bypass cookie
-   - a failing deploy with automatic rollback
-   - `restore db --check` and a real restore
-   - a server rebuild from the data volume
-   - alert delivery
-3. Tear down the test server (data volume deleted explicitly).
-4. Migrate the first real client.
+The code is covered by stub-AWS unit tests and Docker integration tests
+(`bash tests/ec2-dedicated-host/run.sh`). Live validation on AWS is still pending: follow **Task 20 in
+`2026-10-30-ec2-dedicated-host.md`** — the end-to-end run (provision, deploy, maintenance and bypass, failing
+deploy with rollback, backup and restore, monitoring and alert delivery, resize, teardown) plus the list of
+AWS behaviours the stubs cannot prove (S3 conditional-write policy, SSM isolation, IMDS hop limits, DLM
+policy, device paths, …). Record the findings below under "Validation results", then migrate the first
+real client.
+
+## Deviations from design
+
+Building and reviewing the skill hardened it well beyond the design. The important differences:
+
+- **Commands.** Scripts are `init`, `provision` (plan by default, `--apply`), `deploy`, `rollback`, `maint`,
+  `backup`, `restore`, `status`, `secrets`, `monitoring`, `resize`, `upgrade`, `teardown`. There is no
+  `upgrade services`: service images are upgraded by changing the pinned tag in `deploy/compose.yml` and
+  deploying (`references/upgrades.md`). `teardown` (server removed, data kept) is new.
+- **Naming and discovery.** Every AWS name starts with `edh-<client>-<env>`; resources are found by the
+  `edh:client` / `edh:env` tags (plus `edh:role=data` for the volume). The ECR repo `edh/<client>` is shared by
+  a client's envs. The SNS topic is `edh-<client>-<env>-alerts`, in the app region and in us-east-1.
+- **Account pinning.** `deploy.yml` `account_id`: every mutating script refuses other AWS accounts before any
+  other call.
+- **Provisioning.** Read-only preflight before any change (bucket ownership, arm64 support, AZ offering,
+  duplicate resources); never creates an empty data volume for an existing server; termination protection;
+  bootstrap formats only a provably blank device, makes Docker require the `/data` mount, and leaves a
+  success/failure marker that provisioning waits for.
+- **Per-client IAM isolation.** An explicit Deny on reading any other SSM parameters; metrics only into
+  `EDH/<client>-<env>` (host) and `CWAgent/<client>-<env>` (agent, inline policy instead of the managed
+  agent policy); `s3:ResourceAccount` and `--expected-bucket-owner` on every bucket access.
+  `app_uses_instance_role` chooses IMDS hop limit 2 (app may use the role, for S3 uploads) or 1.
+- **Backups.** Uploads are write-once (`If-None-Match`); the host can't overwrite or delete. Every upload is
+  recorded in a host-only manifest (key, sha256, S3 VersionId) that no container may mount (enforced by
+  `deploy.sh`), and restores fetch exactly that version and check the hash. `--latest`/`--date` are resolved
+  from the manifest; `--unverified` (manifest lost) needs an explicit `--key` and sends an alert. Retention:
+  hourly 3 days, daily 90 days, monthly 365 days (Glacier IR after 30), safety dumps 30 days; the newest 24
+  dumps are also kept locally. The freshness alarm uses a `BackupFresh` heartbeat tied to the last successful
+  upload. The monthly drill restores into a side database (not a throwaway container).
+- **Restore.** A real database restore loads into a new database while the app serves, then swaps names
+  under maintenance and keeps the previous data (`app_pre_restore`). `restore disk` accepts only this
+  project's snapshots (`--foreign-snapshot` to override) and prints exact recovery steps if interrupted.
+- **Deploy.** The release's compose file and Caddyfile are validated on the server before anything is
+  installed; the previous configuration is restored on any abort; rollback restores the env the old image ran
+  with. `deploy.sh` refuses compose files that expose `/data`, `/data/backups`, `/`, the Docker socket,
+  `..` paths, privileged mode or host namespaces. **Prod deploys must be exactly `origin/main`**
+  (`--allow-non-main` for emergencies, with a warning and confirmation).
+- **Maintenance.** Exact bypass-cookie match, `/health` always reaches the app, `rotate-bypass`, the link goes
+  to the terminal rather than logs; `deploy --maint` for risky migrations.
+- **Monitoring.** Route 53 health checks are tracked by tags (including `ManagedBy`), replaced safely on a
+  domain change; the CPU-credit alarm exists only on t-family servers. No EC2 auto-recovery action is
+  configured by the skill. Known limitation: the CloudWatch agent package's signature is not verified.
+- **Secrets** are read from stdin and passed to AWS through 0600 temp files, never on a command line.
+- **Upgrades / resize.** `upgrade os` snapshots first and detects the reboot from SSM ping times; `resize`
+  checks arm64 support and AZ availability before stopping and returns to the old type if the new one won't
+  start.
+
+## Validation results
+
+Pending (Task 20).
 
 ## Out of scope (for now)
 
