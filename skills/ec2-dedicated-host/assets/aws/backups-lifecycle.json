@@ -1,0 +1,10 @@
+{ "Rules": [
+  { "ID": "hourly",   "Status": "Enabled", "Filter": { "Prefix": "db/hourly/" },  "Expiration": { "Days": 3 } },
+  { "ID": "daily",    "Status": "Enabled", "Filter": { "Prefix": "db/daily/" },   "Expiration": { "Days": 90 } },
+  { "ID": "monthly",  "Status": "Enabled", "Filter": { "Prefix": "db/monthly/" },
+    "Transitions": [ { "Days": 30, "StorageClass": "GLACIER_IR" } ], "Expiration": { "Days": 365 } },
+  { "ID": "safety",   "Status": "Enabled", "Filter": { "Prefix": "db/safety/" },  "Expiration": { "Days": 30 } },
+  { "ID": "bundles",  "Status": "Enabled", "Filter": { "Prefix": "_edh/bundles/" }, "Expiration": { "Days": 90 } },
+  { "ID": "noncurrent", "Status": "Enabled", "Filter": { "Prefix": "" },
+    "NoncurrentVersionExpiration": { "NoncurrentDays": 30 }, "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 } }
+] }

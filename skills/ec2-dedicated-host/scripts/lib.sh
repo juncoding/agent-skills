@@ -225,6 +225,15 @@ render_bootstrap() {
   sed "s/__VOLUME_ID__/$1/" "$EDH_SKILL_DIR/assets/host/bootstrap.sh"
 }
 
+# render_aws <file-in-assets/aws> — fill placeholders for this client
+render_aws() {
+  local acct; acct=$(aws_account)
+  sed -e "s#__REGION__#$EDH_REGION#g" -e "s#__ACCOUNT__#$acct#g" -e "s#__SSM_PATH__#$EDH_SSM_PATH#g" \
+      -e "s#__BACKUP_BUCKET__#${EDH_PREFIX}-backups-${acct}#g" -e "s#__UPLOADS_BUCKET__#${EDH_PREFIX}-uploads-${acct}#g" \
+      -e "s#__ECR_REPO__#$EDH_ECR_REPO#g" -e "s#__TOPIC__#${EDH_PREFIX}-alerts#g" -e "s#__NAME__#$EDH_NAME#g" \
+      "$EDH_SKILL_DIR/assets/aws/$1"
+}
+
 # wait_ssm <instance-id> — until the SSM agent reports Online (max 10 min)
 wait_ssm() {
   local _

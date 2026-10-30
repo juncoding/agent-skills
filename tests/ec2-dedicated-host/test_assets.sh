@@ -27,4 +27,36 @@ out=$(bash -c ". '$SKILL_DIR/scripts/lib.sh'; load_config '$SKILL_DIR/assets/pro
 assert_contains "$out" "volume id" "render_bootstrap rejects a malformed volume id"
 for u in "$SKILL_DIR"/assets/host/systemd/*; do assert_contains "$(cat "$u")" "edh-" "unit $(basename "$u") references edh"; done
 [[ -n "$(ls "$SKILL_DIR"/assets/host/systemd/ 2>/dev/null)" ]] && pass "systemd units exist" || fail "no systemd units"
+
+# --- AWS templates
+export STUB_LOG="$T/aws.log"
+render() { bash -c ". '$SKILL_DIR/scripts/lib.sh'; load_config '$SKILL_DIR/assets/project/deploy.yml'; EDH_ACCOUNT=123456789012; render_aws $1" 2>&1; }
+for f in ec2-trust.json host-policy.json backups-lifecycle.json uploads-lifecycle.json dlm-policy.json; do
+  [[ -f "$SKILL_DIR/assets/aws/$f" ]] && pass "has $f" || fail "missing assets/aws/$f"
+done
+pol=$(render host-policy.json)
+printf '%s' "$pol" | python3 -m json.tool >/dev/null 2>&1 && pass "rendered host policy is JSON" || fail "rendered host policy invalid"
+assert_contains "$pol" "parameter/acme/prod/*" "policy scoped to client SSM path"
+assert_contains "$pol" "edh-acme-prod-backups-123456789012/db/*" "backup writes scoped to db/"
+assert_not_contains "$pol" "s3:DeleteObject\",\"Resource\":\"arn:aws:s3:::edh-acme-prod-backups" "host cannot delete backups"
+assert_not_contains "$pol" "__" "no unrendered placeholders"
+# structurally: no statement that allows a delete names the backup bucket; metrics only in namespace EDH
+chk=$(printf '%s' "$pol" | python3 -I -c 'import json, sys
+st = json.load(sys.stdin)["Statement"]
+lst = lambda v: v if isinstance(v, list) else [v]
+bad = [s["Sid"] for s in st if any("Delete" in a or a in ("s3:*", "*") for a in lst(s["Action"]))
+       and any("backups" in r for r in lst(s["Resource"]))]
+m = [s for s in st if "cloudwatch:PutMetricData" in lst(s["Action"])]
+print("delete:" + ",".join(bad) + " ns:" + ",".join(s["Condition"]["StringEquals"]["cloudwatch:namespace"] for s in m))' 2>&1)
+assert_eq "$chk" "delete: ns:EDH" "policy: no delete on backups; PutMetricData only in namespace EDH"
+assert_contains "$pol" "repository/edh/acme" "image pulls scoped to the client's ECR repo"
+assert_contains "$pol" "sns:ap-southeast-1:123456789012:edh-acme-prod-alerts" "alerts scoped to the client's topic"
+for f in backups-lifecycle.json uploads-lifecycle.json dlm-policy.json; do
+  out=$(render "$f")
+  printf '%s' "$out" | python3 -m json.tool >/dev/null 2>&1 && pass "rendered $f is JSON" || fail "rendered $f invalid"
+  assert_not_contains "$out" "__" "no unrendered placeholders in $f"
+done
+assert_contains "$(render dlm-policy.json)" '"Value": "acme-prod"' "DLM targets this client's data volume"
+assert_not_contains "$(render uploads-lifecycle.json)" '"Expiration"' "uploads: current versions never expire"
+assert_eq "$(cat "$STUB_LOG" 2>/dev/null)" "" "render_aws uses the cached account (no AWS call)"
 finish
