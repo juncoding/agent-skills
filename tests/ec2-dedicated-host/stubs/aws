@@ -61,6 +61,14 @@ case "$svc $verb" in
     if [[ "${STUB_MODE:-empty}" == empty ]]; then
       echo "An error occurred (404) when calling the HeadBucket operation: Not Found" >&2; exit 254
     fi ;;
+  "s3api list-objects-v2")
+    # $STUB_S3_LIST: the rows to return ("Key<TAB>LastModified<TAB>Size"), filtered by --prefix; default: none
+    if [[ -n "${STUB_S3_LIST:-}" ]]; then
+      pfx=$(optval --prefix)
+      awk -v p="$pfx" 'index($0, p) == 1' "$STUB_S3_LIST"
+    else
+      echo None
+    fi ;;
   "s3 ls")
     p="${clean[2]#s3://}"; b="${p%%/*}"
     [[ -d "$STUB_S3/$b" ]] && (cd "$STUB_S3/$b" || exit; find . -type f | sed 's#^\./##' | sort | while read -r k; do echo "2026-01-01 00:00:00 1 $k"; done) ;;

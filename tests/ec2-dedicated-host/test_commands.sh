@@ -163,16 +163,53 @@ touch "$T/s3/$BUCKET/db/hourly/app-20261030T010000Z.dump" "$T/s3/$BUCKET/db/dail
 out=$(run backup.sh list); rc=$?
 assert_contains "$out" "db/hourly/app-20261030T010000Z.dump" "backup list shows the backups"
 
-# ============ restore db
+# ============ restore db: backups are chosen by S3 upload time (LastModified), never by the name's timestamp —
+# the host role (and an app container using it) can upload any key under db/, e.g. app-29991231T000000Z.dump
+# rows: A genuine, named 23:30 on day X but uploaded 00:30 on day X+1 · B genuine, the newest · C future-named
+# · D named 10 h before its upload · E not a dump
+read -r KEY_A KEY_B KEY_C KEY_D DATE_X DATE_X1 < <(python3 -I - "$T/objects" <<'PY'
+import datetime as dt, sys
+u = dt.timezone.utc; now = dt.datetime.now(u).replace(microsecond=0); h = dt.timedelta(hours=1); m = dt.timedelta(minutes=1)
+x = (now - 72 * h).replace(hour=23, minute=30, second=0)
+name = lambda folder, t: "db/%s/app-%s.dump" % (folder, t.strftime("%Y%m%dT%H%M%SZ"))
+iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+a, b = name("daily", x), name("hourly", now - 2 * h)
+c, d = name("daily", dt.datetime(2999, 12, 31, tzinfo=u)), name("hourly", now - 10 * h)
+rows = [(a, x + h, 2000), (b, now - 2 * h + m, 3000), (c, now - 10 * m, 9), (d, now - 5 * m, 9), ("db/daily/notes.txt", now, 1)]
+open(sys.argv[1], "w").write("".join("%s\t%s\t%d\n" % (k, iso(t), n) for k, t, n in rows))
+print(a, b, c, d, x.strftime("%Y-%m-%d"), (x + h).strftime("%Y-%m-%d"))
+PY
+)
+export STUB_S3_LIST="$T/objects"
+: > "$T/log"
+out=$(run restore.sh db --latest --check); rc=$?
+assert_status $rc 0 "restore --latest --check succeeds"
+assert_contains "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_B --keep" "restore --latest: the newest genuine upload wins"
+assert_contains "$out" "skipping $KEY_C" "restore: a future-named key is skipped"
+assert_contains "$out" "$KEY_C: its name is dated in the future" "restore: future-named key: explained"
+assert_contains "$out" "skipping $KEY_D" "restore: a key whose name doesn't match its upload time is skipped"
+assert_contains "$out" "backup $KEY_B" "restore prints the chosen key"
+assert_contains "$out" "3000 bytes" "restore prints the chosen dump's size"
+assert_contains "$(grep list-objects-v2 "$T/log")" "--expected-bucket-owner 123456789012" "restore lists backups only in this account's bucket"
 : > "$T/log"
 out=$(EDH_YES=1 run restore.sh db --latest); rc=$?
-assert_status $rc 0 "restore --latest succeeds"
-assert_contains "$(script_n 1)" "/opt/edh/bin/edh-restore.sh replace db/hourly/app-20261030T010000Z.dump --yes" "restore --latest picks the newest dump"
+assert_status $rc 0 "restore --latest (replace) succeeds"
+assert_contains "$(script_n 1)" "/opt/edh/bin/edh-restore.sh replace $KEY_B --yes" "restore --latest replaces with the newest genuine dump"
 : > "$T/log"
-out=$(run restore.sh db --date 2026-10-29 --check); rc=$?
-assert_contains "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check db/daily/app-20261029T180000Z.dump --keep" "restore --date --check: that day's dump, side database"
-out=$(run restore.sh db --date 2026-01-01 --check); rc=$?
-assert_contains "$out" "no matching backup found" "restore --date without a dump that day: explained"
+out=$(run restore.sh db --date "$DATE_X1" --check); rc=$?
+assert_contains "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_A --keep" "restore --date matches on the upload date"
+: > "$T/log"
+out=$(run restore.sh db --date "$DATE_X" --check); rc=$?
+assert_status $rc 1 "restore --date of the name's day (not the upload's): nothing"
+assert_contains "$out" "no matching backup found" "restore --date without an upload that day: explained"
+assert_eq "$(calls 'ssm send-command')" "0" "restore --date without a match: nothing sent"
+: > "$T/log"
+out=$(EDH_YES=1 run restore.sh db --key "$KEY_C"); rc=$?
+assert_status $rc 1 "restore --key of a future-named dump refused"
+assert_eq "$(calls 'ssm send-command')" "0" "restore --key of a future-named dump: nothing sent"
+: > "$T/log"
+out=$(run restore.sh db --key "$KEY_A" --check); rc=$?
+assert_contains "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_A --keep" "restore --key of a genuine dump"
 : > "$T/log"
 out=$(EDH_YES=1 run restore.sh db --key 'db/daily/app-20261029T180000Z.dump; reboot'); rc=$?
 assert_status $rc 1 "restore --key with shell syntax refused"
@@ -180,6 +217,7 @@ assert_eq "$(calls 'ssm send-command')" "0" "restore --key with shell syntax: no
 out=$(EDH_YES=1 STUB_SSM_RC=1 run restore.sh db --latest); rc=$?
 assert_status $rc 1 "edh-restore failure: restore fails"
 assert_contains "$out" "failed" "edh-restore failure: explained"
+unset STUB_S3_LIST
 
 # ============ restore disk: stop app, timers, docker (RequiresMountsFor=/data) → umount → swap → mount → start
 : > "$T/log"
