@@ -8,22 +8,25 @@ set -Eeuo pipefail
 REL="${1:?release dir}"; IMAGE="${2:?image}"; MAINT="${3:-}"
 EDH_BIN_DIR="${EDH_BIN_DIR:-/opt/edh/bin}"
 EDH_ENV_FILE="${EDH_ENV_FILE:-/etc/edh/edh.env}"
-install -d -m 755 "$EDH_BIN_DIR" "$(dirname "$EDH_ENV_FILE")"
-install -m 755 "$REL"/host/edh-*.sh "$EDH_BIN_DIR"/
-install -m 644 "$REL/release.env" "$EDH_ENV_FILE"
+# The lock comes before installing anything, so it is taken with the release's own copy of edh-lib.sh;
+# the installed copy (with the new release.env) is loaded once the release is in place.
 # shellcheck source-path=SCRIPTDIR source=edh-lib.sh
-. "${EDH_BIN_DIR:-/opt/edh/bin}/edh-lib.sh" || { echo "edh-deploy: cannot load edh-lib.sh" >&2; exit 1; }
+. "$REL/host/edh-lib.sh" || { echo "edh-deploy: cannot load the release's edh-lib.sh" >&2; exit 1; }
 
 # --- state for the EXIT trap
 SAVED=0       # 1 once the current config is copied to *.prev
+INFRA=0       # 1 once caddy/postgres may be running from the release's files
 SWAPPED=0     # 1 once the app may be running the new image
+DEPLOYED=0    # 1 once the new image passed its health check: nothing after that rolls it back
 EXPECTED=0    # 1 when exiting through done_exit (a planned outcome)
 maint_on=0
 STAGE=""
 PREV=""
+services="caddy postgres"
 KEPT=".env app.env postgres.env compose.yml caddy/Caddyfile"   # restored from *.prev on an unexpected exit
 
 done_exit() { EXPECTED=1; exit "$1"; }
+reload_caddy_once() { dc exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || log "caddy reload failed"; }
 finish_maint() { if (( maint_on )); then "$EDH_BIN_DIR/edh-maint.sh" off >/dev/null; maint_on=0; fi; }
 
 save_prev() { # copy the live config to *.prev before changing anything
@@ -44,15 +47,35 @@ on_exit() {
   trap - EXIT
   if [[ -n "$STAGE" ]]; then rm -rf "$STAGE"; fi
   if (( EXPECTED || rc == 0 )); then exit "$rc"; fi
+  if (( DEPLOYED )); then
+    alert "deploy: follow-up step failed at line $line" "$IMAGE is deployed and healthy, but a step after the health check failed (exit $rc). See the deploy output."
+    exit 0
+  fi
   log "deploy aborted at line $line (exit $rc): restoring the previous configuration"
   # shellcheck disable=SC2086
   restore_prev $KEPT
   if (( SWAPPED )); then
     dc up -d app >/dev/null 2>&1 || log "could not restart the app with the previous configuration"
-    dc exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || true
-    finish_maint || true
-    alert "deploy aborted at line $line" "Deploying $IMAGE stopped unexpectedly after the switch (exit $rc). The previous configuration (${PREV:-none}) was restored and restarted — check the site."
+    reload_caddy_once
+    if wait_health; then
+      finish_maint || true
+      alert "deploy aborted at line $line" "Deploying $IMAGE stopped unexpectedly after the switch (exit $rc); the previous version (${PREV:-none}) was restored and is healthy."
+      exit 2
+    fi
+    # with --maint, maintenance stays ON: users see the maintenance page rather than down.html
+    alert "SITE DOWN after deploy" "Deploying $IMAGE stopped unexpectedly at line $line (exit $rc) after the switch, and the restored previous version (${PREV:-none}) fails /health."
     exit 3
+  fi
+  if (( INFRA )); then
+    # caddy/postgres may already run from the release's files: bring the previous ones back
+    # shellcheck disable=SC2086
+    dc up -d --remove-orphans $services >/dev/null 2>&1 || log "could not restart $services with the previous configuration"
+    reload_caddy_once
+    if ! wait_health; then
+      # with --maint, maintenance stays ON: users see the maintenance page rather than down.html
+      alert "SITE DOWN after deploy" "Deploying $IMAGE stopped at line $line (exit $rc) after $services were updated; with the previous configuration restored the app still fails /health."
+      exit 3
+    fi
   fi
   finish_maint || true
   alert "deploy aborted at line $line" "Deploying $IMAGE failed before the switch (exit $rc); the previous version is still running. See the deploy output."
@@ -60,6 +83,11 @@ on_exit() {
 }
 trap 'on_exit $LINENO' EXIT
 edh_lock
+install -d -m 755 "$EDH_BIN_DIR" "$(dirname "$EDH_ENV_FILE")"
+install -m 755 "$REL"/host/edh-*.sh "$EDH_BIN_DIR"/
+install -m 644 "$REL/release.env" "$EDH_ENV_FILE"
+# shellcheck source-path=SCRIPTDIR source=edh-lib.sh
+. "${EDH_BIN_DIR:-/opt/edh/bin}/edh-lib.sh" || { echo "edh-deploy: cannot load edh-lib.sh" >&2; exit 1; }
 
 install_units() {
   if [[ "${EDH_NO_SYSTEMD:-}" == 1 ]]; then return 0; fi
@@ -164,6 +192,12 @@ install_app_files() {
   if [[ ! -f "$EDH_DATA_DIR/maint/ON" ]]; then "$EDH_BIN_DIR/edh-maint.sh" render; fi
 }
 
+# record_previous — for edh-rollback.sh: the image this deploy replaced, and the app.env it ran with
+record_previous() {
+  printf '%s\n' "$PREV" > "$EDH_APP_DIR/previous_image" \
+    && { [[ ! -f "$EDH_APP_DIR/app.env.prev" ]] || cp -p "$EDH_APP_DIR/app.env.prev" "$EDH_APP_DIR/app.env.rollback"; }
+}
+
 current_image() { sed -n 's/^APP_IMAGE=//p' "$EDH_APP_DIR/.env" 2>/dev/null || true; }
 
 # wait_postgres — the app database itself answers over TCP. During first-boot init the image runs a
@@ -229,8 +263,8 @@ if [[ "${EDH_SKIP_PULL:-}" != 1 ]]; then
 fi
 
 write_compose_env "${PREV:-$IMAGE}"
-services="caddy postgres"
 if [[ "${EDH_USES_GOTENBERG:-false}" == true ]]; then services="$services gotenberg"; fi
+INFRA=1   # set just before the `up`, so a failing `up` is restored too
 # shellcheck disable=SC2086
 dc up -d --remove-orphans $services
 reload_caddy
@@ -254,10 +288,12 @@ fi
 SWAPPED=1
 write_compose_env "$IMAGE"
 if dc up -d app && wait_health; then
-  finish_maint
-  if [[ -n "$PREV" && "$PREV" != "$IMAGE" ]]; then printf '%s\n' "$PREV" > "$EDH_APP_DIR/previous_image"; fi
-  printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$IMAGE" "${PREV:--}" >> "$EDH_DATA_DIR/deploys.log"
-  prune_images "$IMAGE"
+  DEPLOYED=1   # healthy: from here on everything is best-effort bookkeeping
+  finish_maint || log "could not switch maintenance off — run: edh-maint.sh off"
+  if [[ -n "$PREV" && "$PREV" != "$IMAGE" ]]; then record_previous || log "could not record the previous image for edh-rollback.sh"; fi
+  printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$IMAGE" "${PREV:--}" >> "$EDH_DATA_DIR/deploys.log" \
+    || log "could not append to deploys.log"
+  prune_images "$IMAGE" || log "image cleanup failed (not fatal)"
   log "deployed $IMAGE"
   done_exit 0
 fi
@@ -271,6 +307,7 @@ if [[ -n "$ROLLBACK" ]]; then
     alert "deploy rolled back" "$IMAGE failed to start or failed its health check; rolled back to $ROLLBACK."
     done_exit 2
   fi
+  # with --maint, maintenance is deliberately left ON: users see the maintenance page rather than down.html
   alert "SITE DOWN after deploy" "Both $IMAGE and $ROLLBACK fail /health."
   done_exit 3
 fi

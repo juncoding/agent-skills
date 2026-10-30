@@ -16,6 +16,8 @@ case "$svc $verb" in
     echo "${STUB_ACCOUNT:-123456789012}" ;;
   "s3 cp")
     pos=(); for a in "${clean[@]:2}"; do [[ "$a" == --* ]] || pos+=("$a"); done
+    # STUB_S3_FAIL=1: uploads (destination s3://...) fail
+    if [[ -n "${STUB_S3_FAIL:-}" && "${pos[1]}" == s3://* ]]; then echo "stub: upload failed" >&2; exit 1; fi
     src=$(s3path "${pos[0]}"); dst=$(s3path "${pos[1]}")
     if [[ "$src" == - ]]; then mkdir -p "$(dirname "$dst")"; cat > "$dst"
     elif [[ "$dst" == - ]]; then cat "$src"

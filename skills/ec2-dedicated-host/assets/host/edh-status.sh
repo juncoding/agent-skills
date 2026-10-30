@@ -6,13 +6,16 @@ echo "maintenance: $("$EDH_BIN_DIR/edh-maint.sh" status)"
 echo "image: $(sed -n 's/^APP_IMAGE=//p' "$EDH_APP_DIR/.env" 2>/dev/null)"
 echo "last deploy: $(tail -1 "$EDH_DATA_DIR/deploys.log" 2>/dev/null || echo none)"
 last=$(ls -1t "$EDH_DATA_DIR"/backups/app-*.dump 2>/dev/null | head -1 || true)
-schedule=$(backup_schedule 2>/dev/null || echo hourly)   # stale after 2 h (hourly) or 26 h (daily)
+if [[ -n "$last" ]]; then echo "last local dump: $(basename "$last")"; else echo "last local dump: none"; fi
+# freshness = the last successful upload to S3; stale after 2 h (hourly schedule) or 26 h (daily)
+schedule=$(backup_schedule 2>/dev/null || echo hourly)
 window=$(fresh_minutes "$schedule")
-if [[ -n "$last" ]]; then
-  age=$(( ($(date +%s) - $(date -r "$last" +%s)) / 60 ))
-  echo "last backup: $(basename "$last") (${age} min ago, $schedule schedule)$( (( age > window )) && echo '  ← STALE')"
+marker="$EDH_DATA_DIR/backups/.last_upload"
+if [[ -f "$marker" ]]; then
+  age=$(( ($(date +%s) - $(date -r "$marker" +%s)) / 60 ))
+  echo "last upload: ${age} min ago ($schedule schedule)$( (( age > window )) && echo '  ← STALE')"
 else
-  echo "last backup: none  ← STALE"
+  echo "last upload: none  ← STALE"
 fi
 echo "containers:"; dc ps --format '  {{.Service}}: {{.State}} {{.Health}}' 2>/dev/null || true
 echo "disk:"; df -h / "$EDH_DATA_DIR" 2>/dev/null | sed 's/^/  /'

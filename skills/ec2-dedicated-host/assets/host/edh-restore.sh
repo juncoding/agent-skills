@@ -48,17 +48,23 @@ fi
 # --- replace
 stage=prepare; safety=""; f=""
 on_exit() {
-  local rc=$?
+  local rc=$? dbs state health
   trap - EXIT
   if (( rc == 0 )); then exit 0; fi
   case "$stage" in
     prepare)
       alert "restore failed" "Restoring $key failed before anything changed: the live database is untouched." ;;
     maint|swap)
-      # renames run in one transaction, so the live database is still the old one: bring the app back
+      # the renames run in one transaction; look at which databases exist to report what the app now uses
+      dbs=$(pg "select string_agg(datname, ',' order by datname) from pg_database where datname in ('app', 'app_pre_restore', 'app_restore_new')" postgres 2>/dev/null || echo unknown)
+      case ",$dbs," in
+        *,app_pre_restore,*) state="the swap completed: the live database holds the restored data; the previous data is in app_pre_restore" ;;
+        *,app,*app_restore_new,*) state="the live database is unchanged" ;;
+        *) state="unexpected database state ($dbs) — check before using the app" ;;
+      esac
       dc start app >/dev/null 2>&1 || true
-      if wait_health; then "$EDH_BIN_DIR/edh-maint.sh" off >/dev/null || true; fi
-      alert "restore failed" "Restoring $key failed; the live database is unchanged and the app was restarted. Safety dump: ${safety:-none taken}." ;;
+      if wait_health; then "$EDH_BIN_DIR/edh-maint.sh" off >/dev/null || true; health="the app is healthy"; else health="the app fails /health; maintenance left ON"; fi
+      alert "restore failed" "Restoring $key failed: $state; $health. Safety dump: ${safety:-none taken}." ;;
     swapped)
       alert "restore: app unhealthy" "Restored $key but the app fails /health. Maintenance page left ON. The previous data is in database app_pre_restore; safety dump: ${safety:-none}." ;;
   esac

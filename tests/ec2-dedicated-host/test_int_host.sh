@@ -24,16 +24,18 @@ step() { cat "$STUB_LOG" >> "$ALL_LOG" 2>/dev/null; : > "$STUB_LOG"; }   # each 
 alerted() { if grep -qF -- "--subject [$P] $1" "$STUB_LOG"; then echo yes; else echo no; fi; }
 metric_sent() { if grep -qF -- "--metric-name $1 " "$STUB_LOG"; then echo yes; else echo no; fi; }
 mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }   # GNU first: GNU `stat -f` means file-system status
-deploy() { bash "$1/host/edh-deploy.sh" "$1" "$2" >"$T/out" 2>&1; echo $?; }
+deploy() { bash "$1/host/edh-deploy.sh" "$1" "$2" ${3:+"$3"} >"$T/out" 2>&1; echo $?; }
 img() { sed -n 's/^APP_IMAGE=//p' "$T/app/.env"; }
 site() { curl -s localhost:18081/; }
 # in subshells: edh-lib.sh sets -Eeuo pipefail
 pgq() { ( . "$EDH_BIN_DIR/edh-lib.sh"; pg "$1" "${2:-app}" ) 2>/dev/null; }
 dcx() { ( . "$EDH_BIN_DIR/edh-lib.sh"; dc "$@" ); }
 dumps() { ls "$T/data/backups" | grep -c '^app-.*\.dump$'; }
-age_dumps() { /usr/bin/python3 -I -c 'import os, sys, time
+# age_backups <hours> — make every local dump and the last-upload marker <hours> old
+age_backups() { /usr/bin/python3 -I -c 'import glob, os, sys, time
 t = time.time() - float(sys.argv[1]) * 3600
-for f in sys.argv[2:]: os.utime(f, (t, t))' "$1" "$T"/data/backups/app-*.dump; }
+for f in glob.glob(sys.argv[2] + "/app-*.dump") + glob.glob(sys.argv[2] + "/.last_upload"): os.utime(f, (t, t))' \
+  "$1" "$T/data/backups"; }
 ssm_default() {
   printf '%s\t%s\n' /t/prod/_edh/postgres-password pw123abc /t/prod/_edh/maint-bypass tok123 \
     /t/prod/api-key secret-value /t/prod/literal-value 'p$HOME$EDH_UNSET_X' > "$STUB_SSM"
@@ -82,6 +84,31 @@ out=$(docker build -q -t edh-fixture:bad  --build-arg HEALTHY=0 "$TESTS_DIR/fixt
 out=$(printf 'FROM busybox:1.36\nCMD ["/nonexistent-binary"]\n' | docker build -q -t edh-fixture:broken - 2>&1) \
   || bail "docker build failed" "$out"
 docker tag edh-fixture:good edh-fixture:good2; docker tag edh-fixture:bad edh-fixture:bad2
+
+# shims (each used only where a test puts its dir first on PATH)
+mkdir -p "$T/flockbin" "$T/mvbin" "$T/imgbin"
+# flock: macOS has none; logs its calls, exits FAKE_FLOCK_RC
+printf '#!/bin/sh\necho "flock $*" >> "%s"\nexit ${FAKE_FLOCK_RC:-0}\n' "$T/flock.log" > "$T/flockbin/flock"
+# mv: refuses to install an .env naming FAIL_MV_IMAGE — a failure between the switch and the health check
+cat > "$T/mvbin/mv" <<'EOS'
+#!/bin/bash
+for a in "$@"; do
+  if [[ "$a" == *.env.new ]] && grep -qx "APP_IMAGE=$FAIL_MV_IMAGE" "$a" 2>/dev/null; then echo "mv shim: refusing $a" >&2; exit 1; fi
+done
+exec /bin/mv "$@"
+EOS
+# docker: `image ls` lists FAKE_IMAGES, `image rm` / `image prune` are only logged (prune exits FAIL_PRUNE),
+# so prune_images runs for real without touching any image on this machine
+cat > "$T/imgbin/docker" <<EOS
+#!/bin/bash
+case "\$1 \$2" in
+  "image ls") printf '%s\n' \$FAKE_IMAGES ;;
+  "image rm") echo "rm \$3" >> "$T/img.log" ;;
+  "image prune") echo "prune" >> "$T/img.log"; exit "\${FAIL_PRUNE:-0}" ;;
+  *) exec "$REAL_DOCKER" "\$@" ;;
+esac
+EOS
+chmod +x "$T/flockbin/flock" "$T/mvbin/mv" "$T/imgbin/docker"
 : > "$STUB_LOG"
 ssm_default
 make_release "$T/r1" "echo migrated"
@@ -174,24 +201,56 @@ assert_status "$(deploy "$T/r2" edh-fixture:bad)" 1 "failed migration exits 1"
 assert_eq "$(img)" "edh-fixture:good" "failed migration keeps old image"
 assert_eq "$(alerted "deploy failed")" "yes" "failed migration: alert sent"
 
-# ============ unexpected failure after the switch → EXIT trap restores the previous version, exit 3
+# ============ abort after the infra step (postgres won't start with the release's compose.yml)
+make_release "$T/r4" "echo migrated"
+awk '{ print } /image: postgres:18-alpine/ { print "    command: [postgres, -c, bogus_setting_xyz=1]" }' \
+  "$SKILL_DIR/assets/project/compose.yml" > "$T/r4/app/compose.yml"
+step
+assert_status "$(deploy "$T/r4" edh-fixture:good)" 1 "infra abort (broken postgres config): exits 1"
+assert_eq "$(site)" "fixture-ok" "infra abort: site still serving"
+for _ in $(seq 1 30); do [[ "$(pgq 'select 1')" == 1 ]] && break; sleep 1; done   # postgres was just recreated
+assert_eq "$(pgq 'select count(*) from widgets')" "1" "infra abort: old postgres container restored"
+assert_eq "$(grep -c bogus_setting "$T/app/compose.yml")" "0" "infra abort: previous compose.yml restored"
+assert_eq "$(alerted "deploy aborted at line")" "yes" "infra abort: alert sent"
+assert_contains "$(cat "$STUB_LOG")" "previous version is still running" "infra abort: alert says the old version is serving"
+
+# ============ unexpected failure between the switch and the health check → previous version back, exit 2
+step
+assert_status "$(PATH="$T/mvbin:$PATH" FAIL_MV_IMAGE=edh-fixture:good2 deploy "$T/r1" edh-fixture:good2)" 2 \
+  "failure after the switch, previous version healthy: exits 2"
+assert_eq "$(alerted "deploy aborted at line")" "yes" "failure after the switch: alert names the line"
+assert_eq "$(img)" "edh-fixture:good" "failure after the switch: .env restored to the previous image"
+assert_eq "$(site)" "fixture-ok" "failure after the switch: previous image serving"
+
+# ============ bookkeeping failures after a healthy deploy don't roll it back
+sed 's/secret-value/secret-v3/' "$STUB_SSM" > "$T/ssm.v3" && cp "$T/ssm.v3" "$STUB_SSM"
 mv "$T/data/deploys.log" "$T/deploys.keep"; mkdir "$T/data/deploys.log"   # appending to it now fails
 step
-assert_status "$(deploy "$T/r1" edh-fixture:good2)" 3 "unexpected failure after the switch exits 3"
-assert_eq "$(alerted "deploy aborted at line")" "yes" "unexpected failure: alert names the line"
-assert_eq "$(img)" "edh-fixture:good" "unexpected failure: .env restored to the previous image"
-assert_eq "$(site)" "fixture-ok" "unexpected failure: previous image serving"
+assert_status "$(deploy "$T/r1" edh-fixture:good2)" 0 "deploys.log unwritable after a healthy deploy: still exits 0"
+assert_eq "$(img)" "edh-fixture:good2" "deploys.log unwritable: the new image is kept"
+assert_contains "$(cat "$T/out")" "could not append to deploys.log" "deploys.log unwritable: logged"
 rmdir "$T/data/deploys.log"; mv "$T/deploys.keep" "$T/data/deploys.log"
+ssm_default
 
-# ============ edh-rollback.sh
-step
-assert_status "$(deploy "$T/r1" edh-fixture:good2)" 0 "deploy good2"
+# ============ edh-rollback.sh (good2 runs with API_KEY=secret-v3; good ran with secret-value)
 assert_eq "$(cat "$T/app/previous_image")" "edh-fixture:good" "previous image recorded"
+assert_contains "$(cat "$T/app/app.env.rollback" 2>&1)" "API_KEY=secret-value" "deploy keeps the previous app.env for edh-rollback.sh"
+out=$(PATH="$T/flockbin:$PATH" FAKE_FLOCK_RC=1 bash "$EDH_BIN_DIR/edh-rollback.sh" 2>&1); rc=$?
+assert_status "$rc" 1 "edh-rollback.sh with the lock held elsewhere fails"
+assert_contains "$out" "another edh operation is running" "edh-rollback.sh takes the edh lock"
+assert_eq "$(img)" "edh-fixture:good2" "locked-out edh-rollback.sh changes nothing"
 assert_status "$(bash "$EDH_BIN_DIR/edh-rollback.sh" >"$T/out" 2>&1; echo $?)" 0 "edh-rollback.sh succeeds"
 assert_eq "$(img)" "edh-fixture:good" "edh-rollback.sh switches .env to the previous image"
 assert_eq "$(cat "$T/app/previous_image")" "edh-fixture:good2" "edh-rollback.sh records the image it replaced"
 assert_contains "$(tail -1 "$T/data/deploys.log")" "rollback" "edh-rollback.sh logs the rollback"
 assert_eq "$(site)" "fixture-ok" "site serves after edh-rollback.sh"
+assert_contains "$(cat "$T/app/app.env")" "API_KEY=secret-value" "edh-rollback.sh restores the previous app.env"
+assert_eq "$(dcx exec -T app printenv API_KEY 2>&1)" "secret-value" "rolled-back app runs with its previous secrets"
+cp "$T/app/previous_image" "$T/previous_image.keep"; img > "$T/app/previous_image"
+out=$(bash "$EDH_BIN_DIR/edh-rollback.sh" 2>&1); rc=$?
+assert_status "$rc" 1 "edh-rollback.sh when the previous image is already running fails"
+assert_contains "$out" "nothing to roll back to" "edh-rollback.sh when the previous image is already running explains"
+mv "$T/previous_image.keep" "$T/app/previous_image"
 mv "$T/app/previous_image" "$T/previous_image.keep"
 out=$(bash "$EDH_BIN_DIR/edh-rollback.sh" 2>&1); rc=$?
 assert_status "$rc" 1 "edh-rollback.sh without a previous image fails"
@@ -214,10 +273,29 @@ assert_eq "$(alerted "SITE DOWN after deploy")" "yes" "both unhealthy: SITE DOWN
 assert_status "$(deploy "$T/r1" edh-fixture:good)" 0 "recovery deploy succeeds"
 assert_eq "$(site)" "fixture-ok" "site serves after recovery"
 
+# ============ --maint deploy ends with maintenance off
+assert_status "$(deploy "$T/r1" edh-fixture:good --maint)" 0 "--maint deploy succeeds"
+assert_eq "$(bash "$EDH_BIN_DIR/edh-maint.sh" status)" "off" "--maint deploy ends with maintenance off"
+
+# ============ image pruning (docker shim: nothing on this machine is removed)
+: > "$T/img.log"
+assert_status "$(PATH="$T/imgbin:$PATH" EDH_SKIP_PRUNE='' \
+  FAKE_IMAGES="edh-fixture:a edh-fixture:b edh-fixture:c edh-fixture:good edh-fixture:d edh-fixture:good2" \
+  deploy "$T/r1" edh-fixture:good2)" 0 "deploy with pruning"
+assert_eq "$(cat "$T/img.log" | tr '\n' ' ')" "rm edh-fixture:d prune " "prune keeps the 3 newest plus the current and previous images"
+: > "$T/img.log"
+assert_status "$(PATH="$T/imgbin:$PATH" EDH_SKIP_PRUNE='' FAIL_PRUNE=1 FAKE_IMAGES="edh-fixture:good" \
+  deploy "$T/r1" edh-fixture:good)" 0 "failing image prune after a healthy deploy: still exits 0"
+assert_eq "$(img)" "edh-fixture:good" "failing image prune: the new image is kept"
+assert_contains "$(cat "$T/out")" "image cleanup failed" "failing image prune: logged"
+
 # ============ locking (fake flock: macOS has none)
-mkdir -p "$T/flockbin"
-printf '#!/bin/sh\necho "flock $*" >> "%s"\nexit ${FAKE_FLOCK_RC:-0}\n' "$T/flock.log" > "$T/flockbin/flock"
-chmod +x "$T/flockbin/flock"
+make_release "$T/r5" "echo migrated"; sed -i.bak 's/^EDH_APP_MEMORY_MB=.*/EDH_APP_MEMORY_MB=300/' "$T/r5/release.env"
+echo "# r5 marker" >> "$T/r5/host/edh-maint.sh"
+step
+assert_status "$(PATH="$T/flockbin:$PATH" FAKE_FLOCK_RC=1 deploy "$T/r5" edh-fixture:good)" 1 "deploy with the lock held elsewhere exits 1"
+assert_eq "$(grep -c '^EDH_APP_MEMORY_MB=256$' "$EDH_ENV_FILE")" "1" "locked-out deploy does not install release.env"
+assert_eq "$(grep -c 'r5 marker' "$EDH_BIN_DIR/edh-maint.sh")" "0" "locked-out deploy does not install host scripts"
 step
 out=$(PATH="$T/flockbin:$PATH" FAKE_FLOCK_RC=1 bash "$EDH_BIN_DIR/edh-backup.sh" --tag manual 2>&1); rc=$?
 assert_status "$rc" 1 "lock held elsewhere: backup exits 1"
@@ -291,12 +369,17 @@ assert_eq "$(sched 18 15)" "hourly daily " "hourly schedule, daily slot: db/hour
 assert_eq "$(sched 18 01)" "hourly daily monthly " "hourly schedule, daily slot on the 1st: + db/monthly"
 assert_eq "$(sched 09 15 "$T/etc/daily.env")" "" "daily schedule, ordinary hour: nothing uploaded"
 assert_contains "$(cat "$T/out")" "nothing to do" "daily schedule, ordinary hour: says so"
-assert_eq "$(metric_sent BackupFresh)" "yes" "daily schedule, skipped hour: recent dump still reported fresh"
+assert_eq "$(metric_sent BackupFresh)" "yes" "daily schedule, skipped hour: recent upload still reported fresh"
 assert_eq "$(sched 18 15 "$T/etc/daily.env")" "daily " "daily schedule, daily slot: db/daily"
 assert_eq "$(sched 08 15 "$T/etc/daily08.env")" "daily " "daily_backup_hour_utc 08 (leading zero) works"
-age_dumps 30
-assert_eq "$(sched 09 15 "$T/etc/daily.env")" "" "daily schedule, stale dumps, ordinary hour: nothing uploaded"
-assert_eq "$(metric_sent BackupFresh)" "no" "dumps older than 26 h: BackupFresh not published"
+age_backups 30
+assert_eq "$(sched 09 15 "$T/etc/daily.env")" "" "daily schedule, stale backups, ordinary hour: nothing uploaded"
+assert_eq "$(metric_sent BackupFresh)" "no" "last upload older than 26 h: BackupFresh not published"
+# freshness counts successful uploads, not local dumps: a dump whose upload failed doesn't count
+STUB_S3_FAIL=1 sched 18 15 "$T/etc/daily.env" >/dev/null
+assert_eq "$(alerted "backup failed")" "yes" "failed upload: backup fails with an alert"
+assert_eq "$(sched 09 15 "$T/etc/daily.env")" "" "after a failed upload, ordinary hour: nothing uploaded"
+assert_eq "$(metric_sent BackupFresh)" "no" "a fresh local dump whose upload failed is not reported fresh"
 name=$(bash "$EDH_BIN_DIR/edh-backup.sh" --tag manual --force 2>/dev/null)   # fresh dump of widgets (1 row)
 
 # ============ restore check: side database only
@@ -349,7 +432,7 @@ assert_eq "$(curl -s -o /dev/null -w '%{http_code}' localhost:18081/)" "503" "ma
 bash "$EDH_BIN_DIR/edh-maint.sh" off >/dev/null
 
 # ============ status: STALE threshold follows the schedule (hourly 2 h, daily 26 h)
-age_dumps 3
+age_backups 3   # last upload (and dumps) 3 h ago
 out=$(bash "$EDH_BIN_DIR/edh-status.sh" 2>&1)
 assert_contains "$out" "maintenance: off" "status reports"
 assert_contains "$out" "STALE" "status: 3 h old backup is stale on the hourly schedule"
