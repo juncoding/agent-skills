@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# restore.sh db (--date YYYY-MM-DD | --key db/... | --latest) [--check]
-#     --check  restore into a side database app_restore_check (live data untouched; kept for inspection)
+# restore.sh db (--date YYYY-MM-DD | --key db/... | --latest) [--check] [--unverified]
+#     --check       restore into a side database app_restore_check (live data untouched; kept for inspection)
 #     without --check: REPLACES the live database (maintenance on, safety dump first)
+#     The server restores only backups in its own backup manifest (/data/backups/manifest.tsv, written by its
+#     backup job): that exact S3 version, checked against its sha256. A compromised app can add objects to the
+#     bucket, but not to the manifest.
+#     --unverified  also restore a backup that is not in the manifest (warned and alerted). Only for when the
+#                   manifest is gone (it lives on the data volume, so normally it survives a rebuilt server)
+#                   and you are sure where the backup came from.
 # restore.sh disk --snapshot snap-...   replace the whole data volume from a snapshot (app offline a few minutes)
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -63,7 +69,7 @@ pick_backup() {
 
 case "${1:-}" in
   db)
-    shift; key="" date="" mode="" check=0
+    shift; key="" date="" mode="" check=0 unv=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --date)
@@ -72,6 +78,7 @@ case "${1:-}" in
         --key) [[ $# -ge 2 ]] || die "--key needs a value"; key="$2"; mode="${mode}k"; shift 2 ;;
         --latest) mode="${mode}l"; shift ;;
         --check) check=1; shift ;;
+        --unverified) unv=" --unverified"; shift ;;
         *) die "unknown option: $1" ;;
       esac
     done
@@ -86,11 +93,12 @@ case "${1:-}" in
     [[ "$key" =~ ^db/(hourly|daily|monthly|safety)/app-[0-9]{8}T[0-9]{6}Z\.dump$ ]] || die "unexpected backup key: '$key'"
     log "backup $key — uploaded $(printf '%s' "$sel" | cut -f2), $(printf '%s' "$sel" | cut -f3) bytes"
     if (( check )); then
-      ssm_run "$EDH_IID" 2400 "/opt/edh/bin/edh-restore.sh check $key --keep" || die "restore check of $key failed (see the output above)"
+      ssm_run "$EDH_IID" 2400 "/opt/edh/bin/edh-restore.sh check $key --keep$unv" || die "restore check of $key failed (see the output above)"
       ok "restored $key into database app_restore_check (live data untouched)"
     else
-      confirm "REPLACE the live database of $EDH_NAME with $key? (maintenance page on, safety dump first)"
-      ssm_run "$EDH_IID" 3600 "/opt/edh/bin/edh-restore.sh replace $key --yes" \
+      if [[ -n "$unv" ]]; then warn "--unverified: the server restores $key even if its own backup job did not make it"; fi
+      confirm "REPLACE the live database of $EDH_NAME with $key$unv? (maintenance page on, safety dump first)"
+      ssm_run "$EDH_IID" 3600 "/opt/edh/bin/edh-restore.sh replace $key --yes$unv" \
         || die "restore of $key failed — see the output above (the alert email says which database the app now uses)"
       ok "live database replaced with $key (previous data kept in database app_pre_restore)"
     fi ;;
@@ -142,5 +150,5 @@ umount /data' || rc=$?
     ssm_run "$EDH_IID" 600 "${up_script//VOLID/${new_id//-/}}" \
       || die "the new data volume $new_id is attached but the app is not healthy — run status.sh. The old volume $old_id is detached and kept (tagged data-replaced)."
     ok "data volume replaced: $new_id (old $old_id kept, tagged data-replaced — delete it by hand once satisfied)" ;;
-  *) die "usage: restore.sh db (--date YYYY-MM-DD | --key db/... | --latest) [--check] | disk --snapshot snap-..." ;;
+  *) die "usage: restore.sh db (--date YYYY-MM-DD | --key db/... | --latest) [--check] [--unverified] | disk --snapshot snap-..." ;;
 esac

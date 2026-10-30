@@ -220,6 +220,17 @@ assert_contains "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_A --keep
 out=$(EDH_YES=1 run restore.sh db --key 'db/daily/app-20261029T180000Z.dump; reboot'); rc=$?
 assert_status $rc 1 "restore --key with shell syntax refused"
 assert_eq "$(calls 'ssm send-command')" "0" "restore --key with shell syntax: nothing sent"
+# --unverified is passed through to the server (which then restores a key missing from its backup manifest)
+: > "$T/log"
+out=$(EDH_YES=1 run restore.sh db --key "$KEY_A" --unverified); rc=$?
+assert_contains "$(script_n 1)" "/opt/edh/bin/edh-restore.sh replace $KEY_A --yes --unverified" "--unverified passed through (replace)"
+assert_contains "$out" "--unverified" "--unverified is warned about before the confirmation"
+: > "$T/log"
+out=$(run restore.sh db --key "$KEY_A" --check --unverified); rc=$?
+assert_contains "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_A --keep --unverified" "--unverified passed through (check)"
+: > "$T/log"
+out=$(EDH_YES=1 run restore.sh db --key "$KEY_A"); rc=$?
+assert_not_contains "$(script_n 1)" "--unverified" "without --unverified the server verifies against its manifest"
 out=$(EDH_YES=1 STUB_SSM_RC=1 run restore.sh db --latest); rc=$?
 assert_status $rc 1 "edh-restore failure: restore fails"
 assert_contains "$out" "failed" "edh-restore failure: explained"

@@ -1,15 +1,44 @@
 #!/usr/bin/env bash
-# edh-restore.sh check <s3-key> [--keep]   restore into side database app_restore_check, count tables, drop it
-# edh-restore.sh replace <s3-key> --yes    replace the live database:
+# edh-restore.sh check <s3-key> [--keep] [--unverified]   restore into side database app_restore_check, count tables, drop it
+# edh-restore.sh replace <s3-key> --yes [--unverified]    replace the live database:
 #     validate the dump → restore it into app_restore_new (the app keeps serving) → maintenance on → safety dump
 #     → stop app → rename app → app_pre_restore, app_restore_new → app → start app → /health → maintenance off.
 #     The previous data stays in database app_pre_restore until you drop it. Any failure alerts.
+# Only backups in this server's manifest are restored: the exact S3 version it recorded, checked against its
+# sha256 (a compromised app can add objects to the bucket through the instance role, but not to the manifest).
+# --unverified restores a key that is not in the manifest (e.g. the manifest was lost), with a warning and an alert.
 # shellcheck source-path=SCRIPTDIR source=edh-lib.sh
 . "${EDH_BIN_DIR:-/opt/edh/bin}/edh-lib.sh" || { echo "edh-restore: cannot load edh-lib.sh" >&2; exit 1; }
 
-fetch() { # fetch <s3-key> → local path (0600)
-  local f; f="$EDH_DATA_DIR/backups/restore-$(basename "$1")"
-  if [[ ! -s "$f" ]]; then ( umask 077; aws s3 cp "s3://$EDH_BACKUP_BUCKET/$1" "$f" --region "$EDH_REGION" --only-show-errors ); fi
+UNVERIFIED=0
+# fetch <s3-key> → local path (0600). Manifest key: that exact version, sha256 checked. Otherwise refused,
+# unless --unverified (then the current version, with an alert).
+fetch() {
+  local f entry vid want got
+  [[ "${EDH_ACCOUNT_ID:-}" =~ ^[0-9]{12}$ ]] || die "EDH_ACCOUNT_ID (12-digit AWS account) is not set in $EDH_ENV_FILE"
+  f="$EDH_DATA_DIR/backups/restore-$(basename "$1")"
+  rm -f "$f"   # never reuse an earlier download: only what is verified now counts
+  entry=$(awk -F'\t' -v k="$1" '$1 == k { e = $0 } END { if (e != "") print e }' "$EDH_MANIFEST" 2>/dev/null || true)
+  if [[ -n "$entry" ]]; then
+    want=$(printf '%s' "$entry" | cut -f2); vid=$(printf '%s' "$entry" | cut -f3)
+    ( umask 077; aws s3api get-object --bucket "$EDH_BACKUP_BUCKET" --key "$1" --version-id "$vid" \
+        --expected-bucket-owner "$EDH_ACCOUNT_ID" --region "$EDH_REGION" "$f" >/dev/null ) \
+      || die "could not download $1 (version $vid)"
+    got=$(sha256_of "$f")
+    if [[ "$got" != "$want" ]]; then
+      rm -f "$f"
+      die "backup $1 (version $vid) does not match the sha256 in this server's backup manifest — refusing (it may have been tampered with)"
+    fi
+    log "verified $1 against the backup manifest (version $vid)"
+  elif (( UNVERIFIED )); then
+    log "WARNING: $1 is not in this server's backup manifest — restoring it UNVERIFIED (--unverified)"
+    alert "unverified backup restored" "edh-restore.sh $cmd used $1, which is not in this server's backup manifest (--unverified): it may not have been made by this server's backup job."
+    ( umask 077; aws s3api get-object --bucket "$EDH_BACKUP_BUCKET" --key "$1" \
+        --expected-bucket-owner "$EDH_ACCOUNT_ID" --region "$EDH_REGION" "$f" >/dev/null ) \
+      || die "could not download $1"
+  else
+    die "backup $1 is not in this server's backup manifest — it was not made by this server's backup job (or the manifest was lost). Re-run with --unverified only if you are sure."
+  fi
   printf '%s' "$f"
 }
 # need_space <dump-file> — restoring needs room: free space on the data volume must exceed twice the dump's size
@@ -26,10 +55,17 @@ restore_into() { # restore_into <database> <dump-file>
 }
 table_count() { pg "select count(*) from information_schema.tables where table_schema not in ('pg_catalog','information_schema')" "$1"; }
 
-cmd="${1:-}"; key="${2:-}"; opt="${3:-}"
-[[ -n "$key" ]] || die "usage: edh-restore.sh check|replace <s3-key> [--keep|--yes]"
+cmd="${1:-}"; key="${2:-}"; keep=0; yes=0
+[[ -n "$key" ]] || die "usage: edh-restore.sh check|replace <s3-key> [--keep|--yes] [--unverified]"
 case "$cmd" in check|replace) ;; *) die "unknown command: $cmd" ;; esac
-if [[ "$cmd" == replace && "$opt" != --yes ]]; then die "replace needs --yes"; fi
+shift 2
+for a in "$@"; do
+  case "$a" in
+    --keep) keep=1 ;; --yes) yes=1 ;; --unverified) UNVERIFIED=1 ;;
+    *) die "unknown option: $a" ;;
+  esac
+done
+if [[ "$cmd" == replace && $yes != 1 ]]; then die "replace needs --yes"; fi
 edh_lock
 
 if [[ "$cmd" == check ]]; then
@@ -39,7 +75,7 @@ if [[ "$cmd" == check ]]; then
   n=$(table_count app_restore_check)
   log "restored $key into app_restore_check: $n tables"
   (( n > 0 )) || die "restore produced no tables"
-  if [[ "$opt" != --keep ]]; then pg 'drop database app_restore_check with (force)' postgres >/dev/null; fi
+  if (( ! keep )); then pg 'drop database app_restore_check with (force)' postgres >/dev/null; fi
   rm -f "$f"
   echo "$n"
   exit 0

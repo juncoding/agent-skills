@@ -7,8 +7,9 @@
 #            alarm fires when it stops.
 #   safety : before deploys/restores → db/safety/ (kept 30 days)
 #   manual : on demand → db/daily/
-# The newest 24 dumps are kept locally. The server can create backups but never overwrite or delete them in S3;
-# lifecycle rules expire them.
+# Every upload is recorded in the manifest ($EDH_MANIFEST: key, sha256, S3 VersionId, time; newest 2000 lines),
+# which restores verify against. The newest 24 dumps are kept locally. The server can create backups but never
+# overwrite or delete them in S3; lifecycle rules expire them.
 # Prints the dump's file name. Any failure sends an alert.
 # shellcheck source-path=SCRIPTDIR source=edh-lib.sh
 . "${EDH_BIN_DIR:-/opt/edh/bin}/edh-lib.sh" || { echo "edh-backup: cannot load edh-lib.sh" >&2; exit 1; }
@@ -73,6 +74,8 @@ dc exec -T postgres pg_dump -U app -d app -Fc > "$file.part"
 [[ -s "$file.part" ]] || die "pg_dump produced an empty file"
 dc exec -T postgres pg_restore --list < "$file.part" >/dev/null || die "pg_dump output is not a readable archive"
 mv "$file.part" "$file"
+sha=$(sha256_of "$file")
+[[ "$sha" =~ ^[0-9a-f]{64}$ ]] || die "could not checksum $file"
 
 uploaded=0
 # upload <prefix> — create-only (--if-none-match '*'): the host policy allows nothing else, so the server can
@@ -81,10 +84,16 @@ uploaded=0
 # now: multipart upload can't work under the current policy, because UploadPart is authorised as s3:PutObject
 # without If-None-Match, which BackupsWrite denies (only CompleteMultipartUpload carries If-None-Match).
 # TODO: for dumps over 5 GB, change the policy to allow parts and switch to multipart upload with If-None-Match.
+# The upload's VersionId goes into the manifest: restores fetch exactly that version and check its sha256.
 upload() {
-  aws s3api put-object --bucket "$EDH_BACKUP_BUCKET" --key "db/$1/$name" --body "$file" --if-none-match '*' \
-    --expected-bucket-owner "$EDH_ACCOUNT_ID" --region "$EDH_REGION" >/dev/null
-  log "uploaded db/$1/$name"; uploaded=1
+  local vid
+  vid=$(aws s3api put-object --bucket "$EDH_BACKUP_BUCKET" --key "db/$1/$name" --body "$file" --if-none-match '*' \
+    --expected-bucket-owner "$EDH_ACCOUNT_ID" --region "$EDH_REGION" --query VersionId --output text)
+  [[ "$vid" =~ ^[A-Za-z0-9._+/=-]+$ && "$vid" != None && "$vid" != null ]] \
+    || die "db/$1/$name was uploaded without a usable VersionId ('$vid'; is bucket versioning on?) — not recorded in the manifest"
+  printf '%s\t%s\t%s\t%s\n' "db/$1/$name" "$sha" "$vid" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$EDH_MANIFEST"
+  chmod 600 "$EDH_MANIFEST"
+  log "uploaded db/$1/$name (version $vid)"; uploaded=1
 }
 case "$TAG" in
   auto)
@@ -94,6 +103,10 @@ case "$TAG" in
   manual) upload daily ;;
 esac
 if (( uploaded )); then touch "$EDH_DATA_DIR/backups/.last_upload"; fi   # freshness = last successful upload
+# the manifest keeps the newest 2000 uploads (far more than the lifecycle rules keep in S3)
+if [[ -f "$EDH_MANIFEST" ]] && (( $(wc -l < "$EDH_MANIFEST") > 2000 )); then
+  tail -n 2000 "$EDH_MANIFEST" > "$EDH_MANIFEST.new" && mv -f "$EDH_MANIFEST.new" "$EDH_MANIFEST"
+fi
 # keep the newest 24 local dumps
 ls -1t "$EDH_DATA_DIR"/backups/app-*.dump | tail -n +25 | while read -r old; do rm -f "$old"; done
 if [[ "$TAG" == auto ]]; then heartbeat; fi

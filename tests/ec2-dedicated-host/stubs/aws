@@ -52,7 +52,29 @@ case "$svc $verb" in
       exit 254
     fi
     mkdir -p "$(dirname "$dst")"; cp "$body" "$dst"
-    echo '{ "ETag": "\"stub\"" }' ;;
+    # each upload is also kept as a version: $STUB_S3/.versions/<bucket>/<key>/<VersionId> (v1, v2, ...)
+    vdir="$STUB_S3/.versions/$bucket/$key"; mkdir -p "$vdir"
+    vid="v$(( $(ls "$vdir" | wc -l) + 1 ))"; cp "$body" "$vdir/$vid"
+    if [[ "$*" == *"--query VersionId"* ]]; then echo "$vid"; else echo "{ \"ETag\": \"stub\", \"VersionId\": \"$vid\" }"; fi ;;
+  "s3api get-object")
+    # get-object --bucket B --key K [--version-id V] OUTFILE: a version from $STUB_S3/.versions, else the current object
+    bucket="" key="" ver="" out=""
+    i=2
+    while (( i < ${#clean[@]} )); do
+      case "${clean[$i]}" in
+        --bucket) bucket="${clean[$((i + 1))]}"; i=$((i + 2)) ;;
+        --key) key="${clean[$((i + 1))]}"; i=$((i + 2)) ;;
+        --version-id) ver="${clean[$((i + 1))]}"; i=$((i + 2)) ;;
+        --*) i=$((i + 2)) ;;
+        *) out="${clean[$i]}"; i=$((i + 1)) ;;
+      esac
+    done
+    if [[ -n "$ver" ]]; then src="${STUB_S3:?}/.versions/$bucket/$key/$ver"; else src="${STUB_S3:?}/$bucket/$key"; fi
+    if [[ ! -f "$src" ]]; then
+      echo "An error occurred (NoSuchKey) when calling the GetObject operation: The specified key does not exist." >&2; exit 254
+    fi
+    cp "$src" "$out"
+    echo "{ \"VersionId\": \"${ver:-current}\" }" ;;
   "s3api head-bucket")
     # STUB_BUCKET=foreign: the bucket exists in another account (403); else exists (existing) / missing (empty)
     if [[ "${STUB_BUCKET:-}" == foreign ]]; then

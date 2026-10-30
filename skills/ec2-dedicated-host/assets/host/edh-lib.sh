@@ -8,6 +8,11 @@ if [[ -f "$EDH_ENV_FILE" ]]; then . "$EDH_ENV_FILE"; fi
 EDH_APP_DIR="${EDH_APP_DIR:-/opt/edh/app}"
 EDH_DATA_DIR="${EDH_DATA_DIR:-/data}"
 EDH_BIN_DIR="${EDH_BIN_DIR:-/opt/edh/bin}"
+# The backup manifest: one line per uploaded dump, "<s3-key>\t<sha256>\t<VersionId>\t<UTC time>", written only by
+# edh-backup.sh. It lives in /data/backups (0700, root), which no container mounts: a compromised app can add
+# objects to the bucket through the instance role, but cannot add them to the manifest, and restores verify
+# against it.
+EDH_MANIFEST="${EDH_MANIFEST:-$EDH_DATA_DIR/backups/manifest.tsv}"
 
 log() { printf '[edh %s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 # die <message> — log and exit 1; EDH_DIE_LINE = the caller's line, for EXIT traps that report where it stopped
@@ -72,3 +77,8 @@ backup_schedule() {
 fresh_minutes() { if [[ "$1" == hourly ]]; then echo 120; else echo 1560; fi; }
 
 html_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&#39;/g"; }
+
+# sha256_of <file> — hex SHA-256 (sha256sum on the server; shasum on macOS, for the tests)
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}

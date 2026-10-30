@@ -428,6 +428,8 @@ name=$(bash "$EDH_BIN_DIR/edh-backup.sh" --tag manual --force 2>/dev/null)   # f
 # ============ restore check: side database only
 step
 assert_eq "$(bash "$EDH_BIN_DIR/edh-restore.sh" check "db/daily/$name" 2>/dev/null)" "1" "restore check finds 1 table"
+assert_contains "$(grep get-object "$STUB_LOG")" "--key db/daily/$name --version-id " "restore check fetches the manifest's version of the dump"
+assert_eq "$(grep -c "^db/daily/$name"$'\t' "$T/data/backups/manifest.tsv")" "1" "the backup is in the manifest"
 assert_eq "$(pgq 'select count(*) from widgets')" "1" "restore check leaves the live database untouched"
 assert_eq "$(pgq "select count(*) from pg_database where datname = 'app_restore_check'" postgres)" "0" "restore check drops app_restore_check"
 mkdir -p "$T/dfbin"
@@ -448,9 +450,15 @@ assert_eq "$(bash "$EDH_BIN_DIR/edh-drill.sh" >/dev/null 2>&1; echo $?)" "0" "re
 assert_eq "$(metric_sent RestoreDrillSuccess)" "yes" "restore drill publishes RestoreDrillSuccess"
 
 # ============ restore replace
-printf 'not a dump' > "$STUB_S3/bkt/db/daily/app-corrupt.dump"
+printf 'not a dump' > "$STUB_S3/bkt/db/daily/app-corrupt.dump"   # planted: not in the backup manifest
 step
 out=$(bash "$EDH_BIN_DIR/edh-restore.sh" replace db/daily/app-corrupt.dump --yes 2>&1); rc=$?
+assert_status "$rc" 1 "replace with a dump not in the backup manifest is refused"
+assert_contains "$out" "is not in this server's backup manifest" "dump not in the manifest: explained"
+assert_eq "$(alerted "restore failed")" "yes" "dump not in the manifest: alert sent"
+step   # --unverified gets past the manifest; the archive check still stops a corrupt dump
+out=$(bash "$EDH_BIN_DIR/edh-restore.sh" replace db/daily/app-corrupt.dump --yes --unverified 2>&1); rc=$?
+assert_eq "$(alerted "unverified backup restored")" "yes" "--unverified alerts"
 assert_status "$rc" 1 "replace with a corrupt dump fails"
 assert_eq "$(pgq 'select count(*) from widgets')" "1" "corrupt dump: live database intact"
 assert_eq "$(bash "$EDH_BIN_DIR/edh-maint.sh" status)" "off" "corrupt dump: maintenance off"
@@ -486,8 +494,8 @@ assert_not_contains "$(EDH_ENV_FILE="$T/etc/daily.env" bash "$EDH_BIN_DIR/edh-st
 step
 log=$(cat "$ALL_LOG")
 assert_contains "$log" "aws ssm get-parameters-by-path" "SSM secrets read through the stub"
-assert_contains "$log" "aws s3 cp" "S3 uploads/downloads went through the stub"
-assert_contains "$log" "aws s3 ls" "drill listed backups through the stub"
+assert_contains "$log" "aws s3api get-object" "S3 downloads went through the stub"
+assert_not_contains "$log" "aws s3 ls" "the drill picks from the backup manifest, never from a bucket listing"
 assert_contains "$log" "aws cloudwatch put-metric-data" "metrics went through the stub"
 assert_contains "$log" "aws s3api put-object" "backup uploads went through the stub"
 assert_contains "$log" "--namespace EDH/$P " "metrics go to the per-client namespace EDH/<name>"
