@@ -2,9 +2,17 @@
 # edh-drill.sh — monthly restore test: newest dump in S3 → side database → count tables → drop. Alerts on failure.
 # shellcheck source-path=SCRIPTDIR source=edh-lib.sh
 . "${EDH_BIN_DIR:-/opt/edh/bin}/edh-lib.sh" || { echo "edh-drill: cannot load edh-lib.sh" >&2; exit 1; }
-trap 'alert "restore drill FAILED" "The monthly restore test failed on $(hostname). Backups may not be restorable — investigate now."' ERR
+on_exit() {
+  local rc=$?
+  if (( rc )); then
+    alert "restore drill FAILED" "The monthly restore test failed on $(hostname) (exit $rc). Backups may not be restorable — investigate now."
+  fi
+  exit "$rc"
+}
+trap on_exit EXIT
+edh_lock   # held for the whole drill; the nested edh-restore.sh sees EDH_LOCK_HELD
 key=$(aws s3 ls "s3://$EDH_BACKUP_BUCKET/db/" --recursive --region "$EDH_REGION" \
-  | awk '{print $4}' | grep -E '^db/(hourly|daily)/app-.*\.dump$' \
+  | awk '{print $4}' | { grep -E '^db/(hourly|daily)/app-.*\.dump$' || true; } \
   | awk -F/ '{print $NF " " $0}' | sort | tail -1 | cut -d' ' -f2)
 [[ -n "$key" ]] || die "no backups found in s3://$EDH_BACKUP_BUCKET/db/"
 n=$("$EDH_BIN_DIR/edh-restore.sh" check "$key")

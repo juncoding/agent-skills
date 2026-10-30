@@ -1,4 +1,6 @@
 # ec2-dedicated-host stack — one client per server. Values come from .env (written by edh-deploy.sh).
+# Needs Docker Compose v2.30 or later: env_file `format: raw` (secrets are passed literally — no $-interpolation,
+# no quote handling).
 name: ${EDH_NAME:?}
 
 x-logging: &logging
@@ -27,7 +29,9 @@ services:
   app:
     image: ${APP_IMAGE:?}
     restart: unless-stopped
-    env_file: [./app.env]
+    env_file:
+      - path: ./app.env
+        format: raw
     environment:
       PORT: ${APP_PORT:-3000}
     depends_on:
@@ -38,11 +42,13 @@ services:
   postgres:
     image: postgres:18-alpine
     restart: unless-stopped
-    env_file: [./postgres.env]
+    env_file:
+      - path: ./postgres.env
+        format: raw
     volumes:
       - ${EDH_DATA_DIR:-/data}/postgres:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U app -d app"]   # TCP: not up during first-boot init
       interval: 10s
       timeout: 5s
       retries: 5

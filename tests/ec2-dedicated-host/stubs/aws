@@ -23,7 +23,21 @@ case "$svc $verb" in
   "s3 ls")
     p="${clean[2]#s3://}"; b="${p%%/*}"
     [[ -d "$STUB_S3/$b" ]] && (cd "$STUB_S3/$b" || exit; find . -type f | sed 's#^\./##' | sort | while read -r k; do echo "2026-01-01 00:00:00 1 $k"; done) ;;
-  "ssm get-parameters-by-path") cat "${STUB_SSM:-/dev/null}" ;;
+  "ssm get-parameters-by-path")
+    # $STUB_SSM: one "name<TAB>value" per line; in a value, \n and \t stand for a newline and a tab.
+    # Printed like the CLI: JSON by default, name<TAB>value lines with --output text.
+    if [[ "$*" == *"--output text"* ]]; then cat "${STUB_SSM:-/dev/null}"; exit 0; fi
+    /usr/bin/env python3 -I - "${STUB_SSM:-/dev/null}" <<'PY'
+import json, sys
+params = []
+for line in open(sys.argv[1]).read().splitlines():
+    if line:
+        name, _, value = line.partition("\t")
+        params.append({"Name": name, "Type": "SecureString",
+                       "Value": value.replace("\\n", "\n").replace("\\t", "\t")})
+print(json.dumps({"Parameters": params}))
+PY
+    ;;
   "ssm send-command")
     # STUB_SSM_SEND_FAIL=1 fails; otherwise the --parameters JSON is saved to $STUB_LOG.ssm-params
     if [[ "${STUB_SSM_SEND_FAIL:-}" == 1 ]]; then echo "stub: send-command failure" >&2; exit 255; fi

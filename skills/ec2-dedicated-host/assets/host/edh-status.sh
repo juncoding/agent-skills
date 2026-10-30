@@ -6,9 +6,11 @@ echo "maintenance: $("$EDH_BIN_DIR/edh-maint.sh" status)"
 echo "image: $(sed -n 's/^APP_IMAGE=//p' "$EDH_APP_DIR/.env" 2>/dev/null)"
 echo "last deploy: $(tail -1 "$EDH_DATA_DIR/deploys.log" 2>/dev/null || echo none)"
 last=$(ls -1t "$EDH_DATA_DIR"/backups/app-*.dump 2>/dev/null | head -1 || true)
+schedule=$(backup_schedule 2>/dev/null || echo hourly)   # stale after 2 h (hourly) or 26 h (daily)
+window=$(fresh_minutes "$schedule")
 if [[ -n "$last" ]]; then
   age=$(( ($(date +%s) - $(date -r "$last" +%s)) / 60 ))
-  echo "last backup: $(basename "$last") (${age} min ago)$( (( age > 120 )) && echo '  ← STALE')"
+  echo "last backup: $(basename "$last") (${age} min ago, $schedule schedule)$( (( age > window )) && echo '  ← STALE')"
 else
   echo "last backup: none  ← STALE"
 fi
