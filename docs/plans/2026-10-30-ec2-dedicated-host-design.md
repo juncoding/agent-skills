@@ -146,17 +146,18 @@ services the app needs. `docker compose up -d` brings the whole system up.
 ## Sizing
 
 Estimated need is:
-- ~1 GB base (OS, Caddy, Postgres)
+- 768 MB base (OS, Caddy, Postgres)
 - plus measured app memory
-- plus 1 GB if Gotenberg is used
+- plus 900 MB if Gotenberg is used
 
-Choose the smallest instance that keeps ≥ 40 % headroom:
+Choose the smallest instance that keeps ≥ 40 % headroom (need ≤ 60 % of RAM):
 
 | Need | Instance |
 |---|---|
-| ≤ 1.2 GB | t4g.small |
-| ≤ 2.4 GB | t4g.medium |
-| ≤ 4.8 GB | t4g.large |
+| ≤ 1228 MB | t4g.small |
+| ≤ 2457 MB | t4g.medium |
+| ≤ 4915 MB | t4g.large |
+| ≤ 9830 MB | t4g.xlarge |
 
 ## App contract
 
