@@ -37,12 +37,13 @@ alert() {
     --subject "[${EDH_NAME:-edh}] $1" --message "$2" >/dev/null || log "sns publish failed"
 }
 
-# metric <name> [value] — custom metric in namespace EDH (watched by the backup alarm). Never aborts.
+# metric <name> [value] — custom metric in namespace EDH/<name>, one per client: the host policy allows only
+# its own (watched by the backup alarm). Never aborts.
 metric() {
-  if [[ -z "${EDH_REGION:-}" || -z "${EDH_CLIENT:-}" || -z "${EDH_ENV:-}" ]]; then
-    log "metric $1 not published: EDH_REGION, EDH_CLIENT or EDH_ENV is not set"; return 0
+  if [[ -z "${EDH_REGION:-}" || -z "${EDH_NAME:-}" || -z "${EDH_CLIENT:-}" || -z "${EDH_ENV:-}" ]]; then
+    log "metric $1 not published: EDH_REGION, EDH_NAME, EDH_CLIENT or EDH_ENV is not set"; return 0
   fi
-  aws cloudwatch put-metric-data --region "$EDH_REGION" --namespace EDH --metric-name "$1" \
+  aws cloudwatch put-metric-data --region "$EDH_REGION" --namespace "EDH/$EDH_NAME" --metric-name "$1" \
     --dimensions "Client=$EDH_CLIENT,Env=$EDH_ENV" --value "${2:-1}" || log "metric $1 not published"
 }
 

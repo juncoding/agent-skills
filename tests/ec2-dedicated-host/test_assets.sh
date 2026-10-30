@@ -40,15 +40,18 @@ assert_contains "$pol" "parameter/acme/prod/*" "policy scoped to client SSM path
 assert_contains "$pol" "edh-acme-prod-backups-123456789012/db/*" "backup writes scoped to db/"
 assert_not_contains "$pol" "s3:DeleteObject\",\"Resource\":\"arn:aws:s3:::edh-acme-prod-backups" "host cannot delete backups"
 assert_not_contains "$pol" "__" "no unrendered placeholders"
-# structurally: no statement that allows a delete names the backup bucket; metrics only in namespace EDH
+# structurally: no delete on the backup bucket; backup writes create-only; metrics only in namespace EDH/<name>
 chk=$(printf '%s' "$pol" | python3 -I -c 'import json, sys
 st = json.load(sys.stdin)["Statement"]
 lst = lambda v: v if isinstance(v, list) else [v]
 bad = [s["Sid"] for s in st if any("Delete" in a or a in ("s3:*", "*") for a in lst(s["Action"]))
        and any("backups" in r for r in lst(s["Resource"]))]
 m = [s for s in st if "cloudwatch:PutMetricData" in lst(s["Action"])]
-print("delete:" + ",".join(bad) + " ns:" + ",".join(s["Condition"]["StringEquals"]["cloudwatch:namespace"] for s in m))' 2>&1)
-assert_eq "$chk" "delete: ns:EDH" "policy: no delete on backups; PutMetricData only in namespace EDH"
+w = [s for s in st if "s3:PutObject" in lst(s["Action"]) and any("backups" in r for r in lst(s["Resource"]))]
+print("delete:" + ",".join(bad) + " ns:" + ",".join(s["Condition"]["StringEquals"]["cloudwatch:namespace"] for s in m)
+      + " put:" + ",".join(s["Sid"] + "=" + s.get("Condition", {}).get("StringEquals", {}).get("s3:if-none-match", "-") for s in w))' 2>&1)
+assert_eq "$chk" "delete: ns:EDH/acme-prod put:BackupsWrite=*" \
+  "policy: no delete on backups; backup writes create-only (if-none-match); metrics only in namespace EDH/<name>"
 assert_contains "$pol" "repository/edh/acme" "image pulls scoped to the client's ECR repo"
 assert_contains "$pol" "sns:ap-southeast-1:123456789012:edh-acme-prod-alerts" "alerts scoped to the client's topic"
 for f in backups-lifecycle.json uploads-lifecycle.json dlm-policy.json; do
@@ -59,4 +62,6 @@ done
 assert_contains "$(render dlm-policy.json)" '"Value": "acme-prod"' "DLM targets this client's data volume"
 assert_not_contains "$(render uploads-lifecycle.json)" '"Expiration"' "uploads: current versions never expire"
 assert_eq "$(cat "$STUB_LOG" 2>/dev/null)" "" "render_aws uses the cached account (no AWS call)"
+out=$(bash -c ". '$SKILL_DIR/scripts/lib.sh'; load_config '$SKILL_DIR/assets/project/deploy.yml'; EDH_ACCOUNT='1#x'; render_aws host-policy.json" 2>&1)
+assert_contains "$out" "not a 12-digit" "render_aws refuses a malformed pre-set account"
 finish

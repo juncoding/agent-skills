@@ -73,6 +73,8 @@ validate_config() {
   [[ "$EDH_CLIENT" =~ ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ ]] && (( ${#EDH_CLIENT} >= 2 && ${#EDH_CLIENT} <= 21 )) \
     || die "client must be 2-21 lowercase letters/digits, single dashes between them: '$EDH_CLIENT'"
   [[ "$EDH_ENV" =~ ^[a-z][a-z0-9]{1,9}$ ]] || die "env must be 2-10 lowercase letters/digits: '$EDH_ENV'"
+  # anchored: the region is substituted into IAM policy JSON by render_aws
+  [[ "$EDH_REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || die "region must be an AWS region like ap-southeast-1: '$EDH_REGION'"
   [[ -z "$EDH_ACCOUNT_ID" || "$EDH_ACCOUNT_ID" =~ ^[0-9]{12}$ ]] || die "account_id must be empty or a 12-digit AWS account id: '$EDH_ACCOUNT_ID'"
   [[ "$EDH_DOMAIN" =~ ^[a-z0-9.-]+\.[a-z]{2,}$ ]] || die "domain looks invalid: '$EDH_DOMAIN'"
   [[ "$EDH_MONITORING" == cloudwatch || "$EDH_MONITORING" == none ]] || die "monitoring must be cloudwatch or none"
@@ -225,9 +227,14 @@ render_bootstrap() {
   sed "s/__VOLUME_ID__/$1/" "$EDH_SKILL_DIR/assets/host/bootstrap.sh"
 }
 
-# render_aws <file-in-assets/aws> — fill placeholders for this client
+# render_aws <file-in-assets/aws> — fill placeholders for this client.
+# Every substituted value is validated, so nothing can break out of the JSON: the region (validate_config),
+# the account (12 digits, checked here too in case EDH_ACCOUNT was pre-set), and the SSM path, prefix,
+# ECR repo, topic and name, all derived from the validated client and env.
+# TODO(e2e): verify s3:if-none-match condition key (host-policy.json BackupsWrite) during the live AWS test (Task 20).
 render_aws() {
   local acct; acct=$(aws_account)
+  [[ "$acct" =~ ^[0-9]{12}$ ]] || die "render_aws: AWS account is not a 12-digit id: '$acct'"
   sed -e "s#__REGION__#$EDH_REGION#g" -e "s#__ACCOUNT__#$acct#g" -e "s#__SSM_PATH__#$EDH_SSM_PATH#g" \
       -e "s#__BACKUP_BUCKET__#${EDH_PREFIX}-backups-${acct}#g" -e "s#__UPLOADS_BUCKET__#${EDH_PREFIX}-uploads-${acct}#g" \
       -e "s#__ECR_REPO__#$EDH_ECR_REPO#g" -e "s#__TOPIC__#${EDH_PREFIX}-alerts#g" -e "s#__NAME__#$EDH_NAME#g" \

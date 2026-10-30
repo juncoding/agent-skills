@@ -6,7 +6,8 @@
       "Resource": ["arn:aws:ssm:__REGION__:__ACCOUNT__:parameter__SSM_PATH__", "arn:aws:ssm:__REGION__:__ACCOUNT__:parameter__SSM_PATH__/*"] },
     { "Sid": "DecryptSecrets", "Effect": "Allow", "Action": "kms:Decrypt", "Resource": "*",
       "Condition": { "StringEquals": { "kms:ViaService": "ssm.__REGION__.amazonaws.com" } } },
-    { "Sid": "BackupsWrite", "Effect": "Allow", "Action": "s3:PutObject", "Resource": "arn:aws:s3:::__BACKUP_BUCKET__/db/*" },
+    { "Sid": "BackupsWrite", "Effect": "Allow", "Action": "s3:PutObject", "Resource": "arn:aws:s3:::__BACKUP_BUCKET__/db/*",
+      "Condition": { "StringEquals": { "s3:if-none-match": "*" } } },
     { "Sid": "BackupsRead", "Effect": "Allow", "Action": ["s3:GetObject", "s3:ListBucket"],
       "Resource": ["arn:aws:s3:::__BACKUP_BUCKET__", "arn:aws:s3:::__BACKUP_BUCKET__/*"] },
     { "Sid": "AppUploads", "Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
@@ -16,7 +17,7 @@
       "Resource": "arn:aws:ecr:__REGION__:__ACCOUNT__:repository/__ECR_REPO__" },
     { "Sid": "EcrAuth", "Effect": "Allow", "Action": "ecr:GetAuthorizationToken", "Resource": "*" },
     { "Sid": "EdhMetrics", "Effect": "Allow", "Action": "cloudwatch:PutMetricData", "Resource": "*",
-      "Condition": { "StringEquals": { "cloudwatch:namespace": "EDH" } } },
+      "Condition": { "StringEquals": { "cloudwatch:namespace": "EDH/__NAME__" } } },
     { "Sid": "Alerts", "Effect": "Allow", "Action": "sns:Publish", "Resource": "arn:aws:sns:__REGION__:__ACCOUNT__:__TOPIC__" }
   ]
 }

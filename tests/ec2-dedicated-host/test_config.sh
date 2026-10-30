@@ -75,4 +75,11 @@ assert_contains "$(load "$(with daily_backup_hour_utc 24)")" "daily_backup_hour_
 assert_eq "$(loadv "$TPL" EDH_ACCOUNT_ID)" "" "account_id empty by default"
 assert_eq "$(loadv "$(with account_id 123456789012)" EDH_ACCOUNT_ID)" "123456789012" "reads account_id"
 assert_contains "$(load "$(with account_id 12345)")" "account_id must be" "rejects short account_id"
+# --- region: anchored pattern (it is substituted into IAM policy JSON)
+for r in ap-southeast-1 us-east-1 eu-central-2 us-gov-west-1; do
+  assert_eq "$(loadv "$(with region "$r")" EDH_REGION)" "$r" "region $r accepted"
+done
+for r in 'us-east-1#"x' ap-southeast-1x AP-southeast-1 us-east- us-east-12 'us east-1' 'ap-southeast-1;x' u-east-1; do
+  assert_contains "$(loadv "$(with region "$r")" EDH_REGION)" "region must be" "region '$r' rejected"
+done
 finish

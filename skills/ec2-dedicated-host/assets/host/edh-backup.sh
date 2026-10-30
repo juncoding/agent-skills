@@ -7,7 +7,8 @@
 #            alarm fires when it stops.
 #   safety : before deploys/restores → db/safety/ (kept 30 days)
 #   manual : on demand → db/daily/
-# The newest 24 dumps are kept locally. The server can upload but never delete in S3; lifecycle rules expire them.
+# The newest 24 dumps are kept locally. The server can create backups but never overwrite or delete them in S3;
+# lifecycle rules expire them.
 # Prints the dump's file name. Any failure sends an alert.
 # shellcheck source-path=SCRIPTDIR source=edh-lib.sh
 . "${EDH_BIN_DIR:-/opt/edh/bin}/edh-lib.sh" || { echo "edh-backup: cannot load edh-lib.sh" >&2; exit 1; }
@@ -59,7 +60,12 @@ fi
 mkdir -p "$EDH_DATA_DIR/backups"
 chmod 700 "$EDH_DATA_DIR/backups"
 umask 077
-name="app-$(date -u +%Y%m%dT%H%M%SZ).dump"
+# uploads are create-only, so two backups in the same second must not share a name: wait for a new one
+for _ in 1 2 3 4 5; do
+  name="app-$(date -u +%Y%m%dT%H%M%SZ).dump"
+  [[ -e "$EDH_DATA_DIR/backups/$name" ]] || break
+  sleep 1
+done
 file="$EDH_DATA_DIR/backups/$name"
 dc exec -T postgres pg_dump -U app -d app -Fc > "$file.part"
 [[ -s "$file.part" ]] || die "pg_dump produced an empty file"
@@ -67,8 +73,13 @@ dc exec -T postgres pg_restore --list < "$file.part" >/dev/null || die "pg_dump 
 mv "$file.part" "$file"
 
 uploaded=0
+# upload <prefix> — create-only (--if-none-match '*'): the host policy allows nothing else, so the server can
+# never overwrite a backup (which would push the genuine one into a noncurrent version).
+# A single PUT is limited to 5 GB, which is fine for the dump sizes we target. Larger databases need
+# multipart upload, which also supports If-None-Match. TODO: multipart upload for dumps over 5 GB.
 upload() {
-  aws s3 cp "$file" "s3://$EDH_BACKUP_BUCKET/db/$1/$name" --region "$EDH_REGION" --only-show-errors
+  aws s3api put-object --bucket "$EDH_BACKUP_BUCKET" --key "db/$1/$name" --body "$file" --if-none-match '*' \
+    --region "$EDH_REGION" >/dev/null
   log "uploaded db/$1/$name"; uploaded=1
 }
 case "$TAG" in

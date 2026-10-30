@@ -22,6 +22,28 @@ case "$svc $verb" in
     if [[ "$src" == - ]]; then mkdir -p "$(dirname "$dst")"; cat > "$dst"
     elif [[ "$dst" == - ]]; then cat "$src"
     else mkdir -p "$(dirname "$dst")"; cp "$src" "$dst"; fi ;;
+  "s3api put-object")
+    # stores --body at $STUB_S3/<bucket>/<key> like `s3 cp`; with --if-none-match an existing key fails
+    # (S3 conditional write: PreconditionFailed). STUB_S3_FAIL=1 fails every upload.
+    bucket="" key="" body="" inm=""
+    i=2
+    while (( i < ${#clean[@]} )); do
+      case "${clean[$i]}" in
+        --bucket) bucket="${clean[$((i + 1))]}"; i=$((i + 2)) ;;
+        --key) key="${clean[$((i + 1))]}"; i=$((i + 2)) ;;
+        --body) body="${clean[$((i + 1))]}"; i=$((i + 2)) ;;
+        --if-none-match) inm="${clean[$((i + 1))]}"; i=$((i + 2)) ;;
+        *) i=$((i + 1)) ;;
+      esac
+    done
+    if [[ -n "${STUB_S3_FAIL:-}" ]]; then echo "stub: upload failed" >&2; exit 1; fi
+    dst="${STUB_S3:?}/$bucket/$key"
+    if [[ -n "$inm" && -e "$dst" ]]; then
+      echo "An error occurred (PreconditionFailed) when calling the PutObject operation: At least one of the pre-conditions you specified did not hold" >&2
+      exit 254
+    fi
+    mkdir -p "$(dirname "$dst")"; cp "$body" "$dst"
+    echo '{ "ETag": "\"stub\"" }' ;;
   "s3 ls")
     p="${clean[2]#s3://}"; b="${p%%/*}"
     [[ -d "$STUB_S3/$b" ]] && (cd "$STUB_S3/$b" || exit; find . -type f | sed 's#^\./##' | sort | while read -r k; do echo "2026-01-01 00:00:00 1 $k"; done) ;;

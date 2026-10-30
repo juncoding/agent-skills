@@ -24,6 +24,7 @@ step() { cat "$STUB_LOG" >> "$ALL_LOG" 2>/dev/null; : > "$STUB_LOG"; }   # each 
 alerted() { if grep -qF -- "--subject [$P] $1" "$STUB_LOG"; then echo yes; else echo no; fi; }
 metric_sent() { if grep -qF -- "--metric-name $1 " "$STUB_LOG"; then echo yes; else echo no; fi; }
 mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }   # GNU first: GNU `stat -f` means file-system status
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
 deploy() { bash "$1/host/edh-deploy.sh" "$1" "$2" ${3:+"$3"} >"$T/out" 2>&1; echo $?; }
 img() { sed -n 's/^APP_IMAGE=//p' "$T/app/.env"; }
 site() { curl -s localhost:18081/; }
@@ -132,7 +133,7 @@ assert_not_contains "$out" "tok123" "deploy output does not show the bypass toke
 assert_eq "$([[ -f "$T/data/maint/down.html" && -f "$T/data/maint/maintenance.html" ]] && echo yes)" "yes" \
   "deploy installs down.html and renders a default maintenance.html"
 assert_eq "$(mode "$T/data/backups")" "700" "deploy creates the backups directory 0700"
-assert_contains "$(cat "$STUB_LOG")" "s3://bkt/db/safety/" "first deploy takes a safety dump too (the app database exists)"
+assert_contains "$(cat "$STUB_LOG")" "--key db/safety/" "first deploy takes a safety dump too (the app database exists)"
 if ! command -v flock >/dev/null; then assert_contains "$out" "flock not installed" "no flock: deploy says it runs unlocked"; fi
 
 # a table to find again after backup → restore
@@ -182,7 +183,7 @@ assert_status "$(deploy "$T/r1" edh-fixture:bad)" 2 "unhealthy image exits 2"
 assert_eq "$(img)" "edh-fixture:good" "rolled back to good image"
 assert_eq "$(site)" "fixture-ok" "site still serves after rollback"
 assert_eq "$(alerted "deploy rolled back")" "yes" "rollback alert sent"
-assert_contains "$(cat "$STUB_LOG")" "s3://bkt/db/safety/" "pre-deploy safety dump uploaded"
+assert_contains "$(cat "$STUB_LOG")" "--key db/safety/" "pre-deploy safety dump uploaded"
 assert_contains "$(cat "$T/app/app.env")" "API_KEY=secret-value" "rollback restores the previous app.env"
 assert_eq "$(dcx exec -T app printenv API_KEY 2>&1)" "secret-value" "rolled-back app runs with the previous secrets"
 ssm_default
@@ -349,7 +350,7 @@ for c in 0 1; do
   assert_eq "$(ls "$T/data/backups" | grep -c '\.part$')" "0" "bad dump (pg_dump exit $c): no .part left"
   assert_eq "$(alerted "backup failed")" "yes" "bad dump (pg_dump exit $c): alert sent"
   assert_eq "$(dumps)" "$n" "bad dump (pg_dump exit $c): no dump added"
-  assert_not_contains "$(cat "$STUB_LOG")" "s3 cp" "bad dump (pg_dump exit $c): nothing uploaded"
+  assert_not_contains "$(cat "$STUB_LOG")" "put-object" "bad dump (pg_dump exit $c): nothing uploaded"
 done
 step
 out=$(PATH="$T/dumpfail:$PATH" FAKE_DUMP_RC=0 bash "$EDH_BIN_DIR/edh-backup.sh" --tag manual 2>&1)
@@ -378,7 +379,7 @@ sched() { # sched <hour> <day> [env-file] — auto backup at a simulated UTC tim
   step
   PATH="$T/datebin:$PATH" FAKE_HOUR="$1" FAKE_DAY="$2" EDH_ENV_FILE="${3:-$EDH_ENV_FILE}" \
     bash "$EDH_BIN_DIR/edh-backup.sh" >/dev/null 2>"$T/out"
-  sed -n 's#.* s3://bkt/db/\([a-z]*\)/.*#\1#p' "$STUB_LOG" | tr '\n' ' '
+  sed -n 's#.* put-object --bucket bkt --key db/\([a-z]*\)/.*#\1#p' "$STUB_LOG" | tr '\n' ' '
 }
 assert_eq "$(sched 09 15)" "hourly " "hourly schedule, ordinary hour: db/hourly only"
 assert_eq "$(metric_sent BackupFresh)" "yes" "hourly schedule: BackupFresh published"
@@ -397,6 +398,29 @@ STUB_S3_FAIL=1 sched 18 15 "$T/etc/daily.env" >/dev/null
 assert_eq "$(alerted "backup failed")" "yes" "failed upload: backup fails with an alert"
 assert_eq "$(sched 09 15 "$T/etc/daily.env")" "" "after a failed upload, ordinary hour: nothing uploaded"
 assert_eq "$(metric_sent BackupFresh)" "no" "a fresh local dump whose upload failed is not reported fresh"
+# ============ write-once backups: uploads are create-only, an existing key is never overwritten
+mkdir -p "$T/stampbin"   # date: every dump gets the same name
+printf '#!/bin/bash\nif [[ "$*" == "-u +%%Y%%m%%dT%%H%%M%%SZ" ]]; then echo 20260101T000000Z; else exec /bin/date "$@"; fi\n' \
+  > "$T/stampbin/date"
+chmod +x "$T/stampbin/date"
+step
+assert_status "$(PATH="$T/stampbin:$PATH" bash "$EDH_BIN_DIR/edh-backup.sh" --tag manual >/dev/null 2>&1; echo $?)" 0 \
+  "write-once: first upload succeeds"
+assert_contains "$(cat "$STUB_LOG")" "s3api put-object --bucket bkt --key db/daily/app-20260101T000000Z.dump" "backup uploads with put-object"
+assert_contains "$(cat "$STUB_LOG")" "--if-none-match *" "backup upload passes --if-none-match"
+age_backups 5; before=$(mtime "$T/data/backups/.last_upload")
+rm -f "$T/data/backups/app-20260101T000000Z.dump"   # only S3 has it (e.g. a rebuilt server): the name is reused
+step
+out=$(PATH="$T/stampbin:$PATH" bash "$EDH_BIN_DIR/edh-backup.sh" --tag manual 2>&1); rc=$?
+assert_eq "$(( rc != 0 ))" "1" "write-once: second upload to the same key fails"
+assert_contains "$out" "PreconditionFailed" "write-once: S3 refused the overwrite"
+assert_eq "$(alerted "backup failed")" "yes" "write-once: alert sent"
+assert_eq "$(mtime "$T/data/backups/.last_upload")" "$before" "write-once: .last_upload not touched"
+rm -f "$STUB_S3/bkt/db/daily/app-20260101T000000Z.dump" "$T/data/backups/app-20260101T000000Z.dump"
+step   # back-to-back backups (possibly within one second) get distinct names, so both uploads succeed
+b1=$(bash "$EDH_BIN_DIR/edh-backup.sh" --tag manual 2>/dev/null) && b2=$(bash "$EDH_BIN_DIR/edh-backup.sh" --tag manual 2>/dev/null)
+assert_status $? 0 "back-to-back backups both succeed"
+assert_eq "$([[ -n "$b1" && "$b1" != "$b2" ]] && echo distinct)" "distinct" "back-to-back backups get distinct names"
 name=$(bash "$EDH_BIN_DIR/edh-backup.sh" --tag manual --force 2>/dev/null)   # fresh dump of widgets (1 row)
 
 # ============ restore check: side database only
@@ -439,7 +463,7 @@ assert_status "$rc" 0 "replace with a good dump succeeds"
 assert_eq "$(pgq 'select count(*) from widgets')" "1" "replace: live data is the dump's (row added later is gone)"
 assert_eq "$(pgq 'select count(*) from widgets' app_pre_restore)" "2" "replace: previous data kept in app_pre_restore"
 assert_contains "$out" "app_pre_restore" "replace: tells where the previous data is"
-assert_contains "$(cat "$STUB_LOG")" "s3://bkt/db/safety/" "replace: safety dump uploaded first"
+assert_contains "$(cat "$STUB_LOG")" "--key db/safety/" "replace: safety dump uploaded first"
 assert_eq "$(bash "$EDH_BIN_DIR/edh-maint.sh" status)" "off" "replace: maintenance off afterwards"
 assert_eq "$(site)" "fixture-ok" "replace: app serving afterwards"
 
@@ -463,6 +487,9 @@ assert_contains "$log" "aws ssm get-parameters-by-path" "SSM secrets read throug
 assert_contains "$log" "aws s3 cp" "S3 uploads/downloads went through the stub"
 assert_contains "$log" "aws s3 ls" "drill listed backups through the stub"
 assert_contains "$log" "aws cloudwatch put-metric-data" "metrics went through the stub"
+assert_contains "$log" "aws s3api put-object" "backup uploads went through the stub"
+assert_contains "$log" "--namespace EDH/$P " "metrics go to the per-client namespace EDH/<name>"
+assert_not_contains "$log" "--namespace EDH " "no metric in the shared EDH namespace"
 assert_contains "$log" "aws sns publish" "alerts went through the stub"
 assert_not_contains "$log" "BackupSuccess" "the old BackupSuccess metric is gone"
 finish
