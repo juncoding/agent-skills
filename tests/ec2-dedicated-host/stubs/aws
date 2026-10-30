@@ -157,7 +157,9 @@ PY
           esac ;;
         describe-instance-information) echo Online ;;
         describe-volumes)   # STUB_NO_VOLUME=1: no data volume; STUB_MULTI=volume: two of them
+          # STUB_VOL_ATTACHED: the instance a volume is attached to (default None)
           case "$*" in
+            *"Attachments[0].InstanceId"*) echo "${STUB_VOL_ATTACHED:-None}" ;;
             *"Volumes[]."*)
               if [[ -n "${STUB_NO_VOLUME:-}" ]]; then :
               elif [[ "${STUB_MULTI:-}" == volume ]]; then printf 'vol-stub\tap-southeast-1a\nvol-stub2\tap-southeast-1a\n'

@@ -257,3 +257,64 @@ wait_ssm() {
   done
   die "SSM agent on $1 did not come online within 10 minutes"
 }
+
+# release_env <release-id> — non-secret settings for the server (installed as /etc/edh/edh.env, sourced by bash).
+# Holds every EDH_* value the host scripts read (tests/ec2-dedicated-host/test_bundle.sh checks this).
+# EDH_ACCOUNT_ID is the STS-verified account (aws_account), not deploy.yml's account_id, which may be empty:
+# edh-backup.sh refuses to upload without it. Every value is validated by load_config (migrate_cmd has no
+# single quote), so nothing here can break out of its line.
+release_env() {
+  local acct topic=""
+  acct=$(aws_account) || return 1
+  [[ "$acct" =~ ^[0-9]{12}$ ]] || die "release_env: AWS account is not a 12-digit id: '$acct'"
+  [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] || die "release_env: invalid release id: '$1'"
+  if [[ "$EDH_MONITORING" == cloudwatch ]]; then topic="arn:aws:sns:$EDH_REGION:$acct:${EDH_PREFIX}-alerts"; fi
+  cat <<EOV
+EDH_CLIENT=$EDH_CLIENT
+EDH_ENV=$EDH_ENV
+EDH_NAME=$EDH_NAME
+EDH_REGION=$EDH_REGION
+EDH_ACCOUNT_ID=$acct
+EDH_DOMAIN=$EDH_DOMAIN
+EDH_SSM_PATH=$EDH_SSM_PATH
+EDH_BACKUP_BUCKET=${EDH_PREFIX}-backups-${acct}
+EDH_BACKUP_SCHEDULE=$EDH_BACKUP_SCHEDULE
+EDH_DAILY_HOUR_UTC=$EDH_DAILY_HOUR_UTC
+EDH_APP_PORT=$EDH_APP_PORT
+EDH_APP_MEMORY_MB=$EDH_APP_MEMORY_MB
+EDH_USES_GOTENBERG=$EDH_USES_GOTENBERG
+EDH_MIGRATE_CMD='$EDH_MIGRATE_CMD'
+EDH_ALERT_TOPIC_ARN=$topic
+EDH_RELEASE=$1
+EOV
+}
+
+# make_bundle <release-id> — tgz of deploy/ (compose.yml, Caddyfile, maint pages) + this skill's host scripts
+# (every edh-*.sh and systemd unit; never bootstrap.sh) + release.env; prints its path.
+# Usually called as tgz=$(make_bundle ...), where set -e is off: every step checks its own result.
+make_bundle() {
+  local d
+  d=$(mktemp -d) || die "make_bundle: mktemp failed"
+  mkdir -p "$d/app/maint" "$d/host/systemd" || die "make_bundle: cannot create $d"
+  cp deploy/compose.yml deploy/Caddyfile "$d/app/" || die "make_bundle: deploy/compose.yml or deploy/Caddyfile missing"
+  cp deploy/maint/maintenance.html deploy/maint/down.html "$d/app/maint/" || die "make_bundle: deploy/maint/*.html missing"
+  cp "$EDH_SKILL_DIR"/assets/host/edh-*.sh "$d/host/" || die "make_bundle: cannot copy the host scripts"
+  cp "$EDH_SKILL_DIR"/assets/host/systemd/* "$d/host/systemd/" || die "make_bundle: cannot copy the systemd units"
+  ( release_env "$1" ) > "$d/release.env" || { rm -rf "$d"; die "make_bundle: cannot write release.env"; }
+  # COPYFILE_DISABLE: no macOS ._* metadata files in the archive (the server's GNU tar would extract them)
+  COPYFILE_DISABLE=1 tar czf "$d.tgz" -C "$d" . || { rm -rf "$d" "$d.tgz"; die "make_bundle: tar failed"; }
+  rm -rf "$d"
+  printf '%s' "$d.tgz"
+}
+
+# alarm_names regional|global — the CloudWatch alarms monitoring.sh manages: regional ones live in the app
+# region, the site-down alarm (Route 53 health check metric) in us-east-1. Always exact names, never a name
+# prefix: edh-acme-prod- is also the start of client "acme-prod"'s alarms (edh-acme-prod-staging-...).
+alarm_names() {
+  local s
+  if [[ "$1" == global ]]; then printf '%s\n' "${EDH_PREFIX}-site-down"; return 0; fi
+  for s in disk-root-warn disk-root-crit disk-data-warn disk-data-crit mem-high cpu-high cpu-credits-low \
+           status-check backup-stale; do
+    printf '%s\n' "${EDH_PREFIX}-$s"
+  done
+}
