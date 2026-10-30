@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# deploy.sh [--maint] [--allow-dirty]
+# deploy.sh [--maint] [--allow-dirty] [--allow-non-main]
 # Build the current commit for arm64, push to ECR, ship deploy/ + host scripts, roll out via SSM.
-#   --maint        show the maintenance page during migrations (use for risky migrations)
-#   --allow-dirty  deploy uncommitted changes (tag gets -dirty<timestamp>)
+#   --maint           show the maintenance page during migrations (use for risky migrations)
+#   --allow-dirty     deploy uncommitted changes (tag gets -dirty<timestamp>)
+#   --allow-non-main  env prod only: deploy although HEAD is not exactly origin/main (emergency hotfix; warns and
+#                     asks for confirmation — EDH_YES=1 only after the user agreed)
+# env prod: refuses unless the current branch is main and HEAD equals origin/main (after git fetch origin main).
 # Exit: 0 live · 1 on any failure (the message says whether the previous version is still serving).
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$(dirname "$0")/lib.sh"
-MAINT=""; DIRTY_OK=0
-for a in "$@"; do case "$a" in --maint) MAINT=--maint ;; --allow-dirty) DIRTY_OK=1 ;; *) die "unknown option: $a" ;; esac; done
+MAINT=""; DIRTY_OK=0; NON_MAIN_OK=0
+for a in "$@"; do
+  case "$a" in --maint) MAINT=--maint ;; --allow-dirty) DIRTY_OK=1 ;; --allow-non-main) NON_MAIN_OK=1 ;; *) die "unknown option: $a" ;; esac
+done
 load_config
 require aws
 require_account
@@ -24,17 +29,67 @@ check_compose_mounts() {
   [[ -z "$hits" ]] || die "deploy/compose.yml mounts the data directory or /data/backups into a container — refusing: that would put the backup manifest within the app's reach. Mount only subdirectories such as \${EDH_DATA_DIR:-/data}/caddy:
 $hits"
 }
+# check_prod_source — prod runs only what is on GitHub main: the current branch is main and HEAD is exactly
+# origin/main (catches "forgot to pull", unpushed commits and the wrong branch). --allow-non-main deploys anyway,
+# after a prominent warning and a confirmation.
+check_prod_source() {
+  local branch head subject origin counts ahead behind why fix
+  branch=$(git symbolic-ref --short -q HEAD || true)
+  head=$(git rev-parse --short=12 HEAD) || die "cannot read HEAD"
+  subject=$(git log -1 --format=%s HEAD)
+  if ! git fetch origin main --quiet; then
+    why="could not fetch main from origin, so it cannot be checked that this is what GitHub main holds"
+    fix="check 'git remote -v', your network and your GitHub access, then deploy again"
+  elif ! origin=$(git rev-parse -q --verify 'FETCH_HEAD^{commit}'); then
+    why="git fetch origin main returned no commit"
+    fix="check 'git remote -v' and that origin has a main branch"
+  elif [[ -z "$branch" ]]; then
+    why="detached HEAD (not on a branch)"
+    fix="git checkout main && git pull"
+  elif [[ "$branch" != main ]]; then
+    why="on branch '$branch', not main"
+    fix="git checkout main && git pull (merge the work into main on GitHub first)"
+  else
+    counts=$(git rev-list --left-right --count "HEAD...$origin") || die "cannot compare HEAD with origin/main"
+    ahead=$(printf '%s' "$counts" | cut -f1); behind=$(printf '%s' "$counts" | cut -f2)
+    if (( ahead > 0 && behind > 0 )); then
+      why="local main and origin/main have diverged ($ahead local commit(s) not on origin/main, $behind on origin/main not here)"
+      fix="git pull --rebase, then git push (or reconcile by hand)"
+    elif (( behind > 0 )); then
+      why="local main is $behind commit(s) behind origin/main"
+      fix="git pull"
+    elif (( ahead > 0 )); then
+      why="local main has $ahead commit(s) that are not on origin/main (unpushed)"
+      fix="git push (through your usual review), then deploy again"
+    else
+      return 0
+    fi
+  fi
+  if (( ! NON_MAIN_OK )); then
+    die "prod deploys must be exactly origin/main: $why.
+  Fix: $fix
+  (Emergency hotfix only, and only if the user asks: deploy.sh --allow-non-main)"
+  fi
+  printf '\n\033[1;41;37m EMERGENCY DEPLOY TO PROD — NOT origin/main \033[0m\n' >&2
+  warn "$why"
+  warn "deploying branch '${branch:-detached HEAD}' at $head \"$subject\" to $EDH_NAME"
+  warn "the next normal deploy from main replaces it: merge this fix into main on GitHub"
+  confirm "Deploy branch '${branch:-detached HEAD}' at $head (not origin/main) to PROD $EDH_NAME?"
+}
+
 check_compose_mounts
-ACCT=$(aws_account)
-require_instance
-REG="${ACCT}.dkr.ecr.${EDH_REGION}.amazonaws.com"
-BUCKET="${EDH_PREFIX}-backups-${ACCT}"
-SHA=$(git rev-parse --short=12 HEAD)
+SHA=$(git rev-parse --short=12 HEAD) || die "not a git repository (run from the project root)"
 if [[ -n "$(git status --porcelain)" ]]; then
   (( DIRTY_OK )) || die "uncommitted changes — commit first, or pass --allow-dirty"
   SHA="${SHA}-dirty$(date +%s)"
 fi
 [[ "$SHA" =~ ^[0-9a-f]+(-dirty[0-9]+)?$ ]] || die "unexpected commit id: '$SHA'"   # goes into the remote script
+if [[ "$EDH_ENV" == prod ]]; then check_prod_source; fi
+log "deploying ${SHA%%-dirty*} \"$(git log -1 --format=%s HEAD)\" to $EDH_NAME$( [[ "$SHA" == *-dirty* ]] && echo ' (with uncommitted changes)')"
+ACCT=$(aws_account)
+require_instance
+REG="${ACCT}.dkr.ecr.${EDH_REGION}.amazonaws.com"
+BUCKET="${EDH_PREFIX}-backups-${ACCT}"
 IMAGE="$REG/$EDH_ECR_REPO:$SHA"
 
 ip=$(awsr ec2 describe-addresses --filters "Name=instance-id,Values=$EDH_IID" --query 'Addresses[0].PublicIp' --output text)

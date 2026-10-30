@@ -13,7 +13,9 @@ BUCKET="edh-acme-prod-backups-123456789012"
 
 mkdir "$T/p"; cd "$T/p" || exit 1
 bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.acme.com --emails a@x.com --account-id 123456789012 >/dev/null 2>&1
-git init -q . && git add -A && git -c user.email=t@example.com -c user.name=t commit -qm init
+git init -q -b main . && git add -A && git -c user.email=t@example.com -c user.name=t commit -qm init
+# env prod deploys only origin/main: a local bare repository stands in for GitHub
+git init -q --bare -b main "$T/origin.git" && git remote add origin "$T/origin.git" && git push -q origin main
 
 run() { local s="$1"; shift; bash "$SKILL_DIR/scripts/$s" "$@" 2>&1; }
 calls() { grep -c -- "$1" "$T/log" || true; }
