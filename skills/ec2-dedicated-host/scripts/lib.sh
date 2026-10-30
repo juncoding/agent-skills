@@ -70,3 +70,81 @@ validate_config() {
     die "alert_emails required when monitoring: cloudwatch"
   fi
 }
+
+awsr()    { aws --region "$EDH_REGION" "$@"; }        # app region
+aws_use1() { aws --region us-east-1 "$@"; }           # Route 53 health-check metrics live in us-east-1
+
+aws_account() {
+  if [[ -z "${EDH_ACCOUNT:-}" ]]; then EDH_ACCOUNT=$(aws sts get-caller-identity --query Account --output text); fi
+  printf '%s' "$EDH_ACCOUNT"
+}
+
+# tag_spec <resource-type> <name> [Key=Value ...] — value for --tag-specifications
+tag_spec() {
+  local rtype="$1" name="$2" extra="" kv; shift 2
+  for kv in "$@"; do extra="${extra},{Key=${kv%%=*},Value=${kv#*=}}"; done
+  printf 'ResourceType=%s,Tags=[{Key=Name,Value=%s},{Key=edh:client,Value=%s},{Key=edh:env,Value=%s},{Key=Client,Value=%s},{Key=ManagedBy,Value=ec2-dedicated-host}%s]' \
+    "$rtype" "$name" "$EDH_CLIENT" "$EDH_ENV" "$EDH_CLIENT" "$extra"
+}
+
+# guard_not_protected <ec2-resource-id> — never touch anything tagged Protect=true.
+guard_not_protected() {
+  local v
+  v=$(awsr ec2 describe-tags --filters "Name=resource-id,Values=$1" "Name=key,Values=Protect" --query 'Tags[0].Value' --output text)
+  [[ "$v" != true ]] || die "refusing: $1 is tagged Protect=true (it holds data). Remove the tag by hand only if you really mean it."
+}
+
+# confirm <question> — EDH_YES=1 skips the prompt (the agent sets it only after the user agreed in chat).
+confirm() {
+  local a=""
+  if [[ "${EDH_YES:-}" == 1 ]]; then return 0; fi
+  read -r -p "$1 [y/N] " a || true
+  [[ "$a" =~ ^[Yy]$ ]] || die "aborted"
+}
+
+gen_secret() { openssl rand -hex 32 | cut -c1-"${1:-40}"; }
+
+instance_id() {
+  awsr ec2 describe-instances \
+    --filters "Name=tag:edh:client,Values=$EDH_CLIENT" "Name=tag:edh:env,Values=$EDH_ENV" \
+              "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+    --query 'Reservations[].Instances[].InstanceId' --output text
+}
+
+require_instance() {
+  EDH_IID=$(instance_id)
+  [[ -n "$EDH_IID" && "$EDH_IID" != None ]] || die "no server for $EDH_NAME yet — run provision.sh first"
+  [[ "$EDH_IID" != *[[:space:]]* ]] || die "more than one server tagged $EDH_NAME: $EDH_IID"
+}
+
+# ssm_run <instance-id> <timeout-seconds> <script> — run a bash script on the server as root.
+# The script travels base64-encoded, so no quoting issues. Prints its output; returns its exit code.
+ssm_run() {
+  local iid="$1" timeout="$2" b64 cid status code err
+  b64=$(printf '%s' "$3" | base64 | tr -d '\n')
+  cid=$(awsr ssm send-command --instance-ids "$iid" --document-name AWS-RunShellScript \
+    --parameters "{\"commands\":[\"f=\$(mktemp); echo $b64 | base64 -d > \$f; bash \$f; rc=\$?; rm -f \$f; exit \$rc\"],\"executionTimeout\":[\"$timeout\"]}" \
+    --timeout-seconds 60 --query Command.CommandId --output text)
+  while :; do
+    sleep 3
+    status=$(awsr ssm get-command-invocation --command-id "$cid" --instance-id "$iid" --query Status --output text 2>/dev/null || echo Pending)
+    case "$status" in Pending|InProgress|Delayed) ;; *) break ;; esac
+  done
+  awsr ssm get-command-invocation --command-id "$cid" --instance-id "$iid" --query StandardOutputContent --output text
+  err=$(awsr ssm get-command-invocation --command-id "$cid" --instance-id "$iid" --query StandardErrorContent --output text)
+  if [[ -n "$err" && "$err" != None ]]; then printf '%s\n' "$err" >&2; fi
+  code=$(awsr ssm get-command-invocation --command-id "$cid" --instance-id "$iid" --query ResponseCode --output text)
+  [[ "$code" =~ ^-?[0-9]+$ ]] || code=1
+  return "$code"
+}
+
+# wait_ssm <instance-id> — until the SSM agent reports Online (max 10 min)
+wait_ssm() {
+  local i
+  for i in $(seq 1 60); do
+    if [[ $(awsr ssm describe-instance-information --filters "Key=InstanceIds,Values=$1" \
+           --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null) == Online ]]; then return 0; fi
+    sleep 10
+  done
+  die "SSM agent on $1 did not come online within 10 minutes"
+}
