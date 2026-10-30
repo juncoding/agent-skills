@@ -157,7 +157,7 @@ for m in ./app.env ./postgres.env ./.env ./compose.yml ./app.env.rollback ./comp
   compose_refused "reserved for the skill" "$P" "$I" "    volumes:" "      - $m:/x"
 done
 # /data/caddy and /data/maint belong to caddy, /data/postgres to postgres
-for m in /data/caddy /data/maint/x '${EDH_DATA_DIR:-/data}/postgres'; do
+for m in /data/caddy /data/maint '${EDH_DATA_DIR:-/data}/postgres'; do
   compose_refused "reserved for the" "$P" "$I" "    volumes:" "      - $m:/x"
 done
 cp deploy/compose.yml "$T/compose.save"
@@ -174,6 +174,10 @@ compose_refused "outside the compose directory" "$P" "$I" "    label_file: /etc/
 compose_refused "reserved for the skill" "$P" "$I" "    secrets: [s2]" "secrets:" "  s2:" "    file: ./app.env"
 # images are built by deploy.sh, never on the server
 compose_refused "build" "$P" "    build: ."
+# bind sources are one level deep: a nested path could pass through a symlink a container planted
+for m in ./a/b '/data/uploads/x' '${EDH_DATA_DIR:-/data}/uploads/x'; do
+  compose_refused "one level" "$P" "$I" "    volumes:" "      - $m:/x"
+done
 # the violation names the service and the key
 compose_plus "$P" "$I" "    privileged: true"
 out=$(run deploy.sh --allow-dirty); rc=$?

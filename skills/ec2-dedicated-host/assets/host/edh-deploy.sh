@@ -243,7 +243,9 @@ compose_check() {
     vargs=(--scan "$STAGE/compose.yml")
   fi
   rc=0
-  out=$(python3 -I "$REL/host/edh-compose-check.py" "$w/cfg.json" "$STAGE" --data-dir "$EDH_DATA_DIR" "${vargs[@]}" 2>&1) || rc=$?
+  # --mount-root: bind sources are also checked where Docker will mount them (the installed app dir, /data)
+  out=$(python3 -I "$REL/host/edh-compose-check.py" "$w/cfg.json" "$STAGE" --data-dir "$EDH_DATA_DIR" \
+    --mount-root "$EDH_APP_DIR" "${vargs[@]}" 2>&1) || rc=$?
   rm -rf "$w"   # the rendered config holds the bypass token
   if (( rc == 1 )); then printf '%s\n' "$out" >&2; die "the release's compose.yml breaks the compose rules — nothing installed"; fi
   (( rc == 0 )) || die "could not check the release's compose.yml: $out"

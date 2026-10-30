@@ -106,14 +106,18 @@ The scaffolded `compose.yml` is the template to keep. You may add services, envi
 - **Variables:** only `EDH_NAME`, `APP_IMAGE`, `APP_PORT`, `APP_MEMORY_MB`, `DOMAIN`, `MAINT_BYPASS`,
   `COMPOSE_PROFILES`, `EDH_DATA_DIR`, `EDH_HTTP_PORT`, `EDH_HTTPS_PORT` — the ones the server sets. Any other
   `${VAR}` is refused by name (it would take whatever value the shell that renders the file happens to have).
-- **Bind mounts next to `compose.yml`** (on the server `/opt/edh/app`): subdirectories only (`./uploads`), never
-  a top-level file and never the skill's own entries: `compose.yml`, `.env`, `*.env`, `*.prev`, `*.rollback`,
-  `previous_image`, `maint-templates`.
-- **Bind mounts under `/data`:** a `/data/<dir>` (or `${EDH_DATA_DIR:-/data}/<dir>`), never `/data` itself and
-  never `/data/backups` — it holds the backup manifest, which restores trust because the app can't reach it.
-  `/data/caddy` and `/data/maint` are only for `caddy`, `/data/postgres` only for `postgres`.
+- **Bind sources are one level deep:** `./<dir>` next to `compose.yml` (on the server `/opt/edh/app/<dir>`) or
+  `/data/<dir>` (`${EDH_DATA_DIR:-/data}/<dir>`). Nested paths (`./a/b`, `/data/uploads/x`) are refused: a
+  container with a read-write mount could plant a symlink that a nested path would then pass through.
+- **Next to `compose.yml`:** directories only, never a top-level file and never the skill's own entries:
+  `compose.yml`, `.env`, `*.env`, `*.prev`, `*.rollback`, `previous_image`, `maint-templates`.
+- **Under `/data`:** never `/data` itself and never `/data/backups` — it holds the backup manifest, which
+  restores trust because the app can't reach it. `/data/caddy` and `/data/maint` are only for `caddy`,
+  `/data/postgres` only for `postgres`.
 - **Nothing else from the server:** any other bind source is refused. A bind source that is a **symlink on the
-  server is followed** by Docker, so never create symlinks under `/data`.
+  server is followed** by Docker, so never create symlinks under `/data` or `/opt/edh/app`: on the server each
+  bind source is also checked where it will be mounted, and must be a real directory owned by root (or not
+  exist yet — Docker creates it), else the deploy stops before installing anything.
 - **`env_file` / `label_file`:** inside the compose directory; the only top-level ones are `app.env` (for `app`)
   and `postgres.env` (for `postgres`). `secrets`/`configs` `file:` likewise inside and not reserved.
 - **No `build:`** — images are built by `deploy.sh` on the Mac and pushed, never on the server.
@@ -134,7 +138,8 @@ file's text:
 1. on the Mac by `deploy.sh`, before anything is built: `compose.yml` alone in a temp directory with empty
    `app.env`/`postgres.env`, rendered under `env -i` with placeholder values and the `gotenberg` profile;
 2. on the server by `edh-deploy.sh`, before anything is installed: the staged `compose.yml` rendered with the
-   real values it is about to get. A refusal there ends the deploy with exit 1, nothing changed.
+   real values it is about to get, plus the mount-time check of each bind source (`--mount-root`). A refusal
+   there ends the deploy with exit 1, nothing changed.
 
 The variable list comes from `docker compose config --variables`; a Compose too old for that gets a scan of
 the file instead (and says so). If Compose itself rejects the file, the deploy refuses with Compose's error.

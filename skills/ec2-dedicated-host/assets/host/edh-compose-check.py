@@ -6,8 +6,13 @@ server (edh-deploy.sh, with the real values, before anything is installed):
 
     docker compose -f DIR/compose.yml config --no-env-resolution --format json > CFG.json
     docker compose -f DIR/compose.yml config --variables --format json > VARS.json      # if supported
-    python3 -I edh-compose-check.py CFG.json DIR [--dir ALIAS]... [--data-dir /data] \
+    python3 -I edh-compose-check.py CFG.json DIR [--dir ALIAS]... [--data-dir /data] [--mount-root /opt/edh/app] \
         (--variables VARS.json | --scan DIR/compose.yml)
+
+--mount-root (on the server): DIR is a staging copy, but Docker mounts the INSTALLED paths. Every bind source is
+also checked where it will really be mounted — ./<dir> under the mount root, /data/<dir> as is: if it exists it
+must be a real directory (not a symlink), owned by root when this runs as root. A container with a read-write
+mount could otherwise plant a symlink that a later release mounts through.
 
 Exit 0: allowed. Exit 1: refused; the reasons are printed (each with its service and key). Exit 2: usage or
 unreadable input.
@@ -15,6 +20,7 @@ unreadable input.
 import json
 import os
 import re
+import stat
 import sys
 
 ALLOWED_VARS = {"EDH_NAME", "APP_IMAGE", "APP_PORT", "APP_MEMORY_MB", "DOMAIN", "MAINT_BYPASS",
@@ -36,7 +42,7 @@ def usage(msg):
 def main(argv):
     if len(argv) < 2:
         usage("expected CFG.json DIR [options]")
-    cfg_path, dirs, data_dir, var_path, scan_path = argv[0], [argv[1]], "/data", None, None
+    cfg_path, dirs, data_dir, var_path, scan_path, mount_root = argv[0], [argv[1]], "/data", None, None, None
     rest = argv[2:]
     while rest:
         opt = rest.pop(0)
@@ -51,11 +57,15 @@ def main(argv):
             var_path = val
         elif opt == "--scan":
             scan_path = val
+        elif opt == "--mount-root":
+            mount_root = val
         else:
             usage("unknown option %s" % opt)
-    # paths are compared after resolving symlinks (realpath), as the kernel will when it mounts them
-    dirs = sorted({os.path.realpath(d) for d in dirs})
-    data_dir = os.path.realpath(data_dir)
+    # a path counts as inside a directory in either spelling, as written or with symlinks in its prefix resolved
+    # (e.g. macOS /var -> /private/var); the rules themselves look at the path as written (normalized)
+    dirs = sorted({os.path.normpath(d) for d in dirs} | {os.path.realpath(d) for d in dirs})
+    data_dirs = sorted({os.path.normpath(data_dir), os.path.realpath(data_dir)})
+    data_dir = os.path.normpath(data_dir)
     try:
         cfg = json.load(open(cfg_path))
     except (OSError, ValueError) as e:
@@ -66,12 +76,32 @@ def main(argv):
     def bad(kind, where, why):
         found[kind].append("%s: %s" % (where, why))
 
+    def rel_to(path, bases):
+        """path relative to one of bases if strictly inside it (as written, or with symlinks resolved), else None"""
+        for p in (os.path.normpath(path), os.path.realpath(path)):
+            for d in bases:
+                if p.startswith(d + "/"):
+                    return p[len(d) + 1:]
+        return None
+
     def rel_in(path):
-        """path relative to the compose directory if strictly inside it, else None"""
-        p = os.path.realpath(path)
-        for d in dirs:
-            if p.startswith(d + "/"):
-                return p[len(d) + 1:]
+        return rel_to(path, dirs)
+
+    def mount_problem(path):
+        """why the directory Docker will mount at path is unsafe, or None (a missing path is fine: Docker creates it)"""
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            return "cannot inspect it (%s)" % e
+        if stat.S_ISLNK(st.st_mode):
+            return "it is a symlink (to %s) — never create symlinks there" % os.readlink(path)
+        if not stat.S_ISDIR(st.st_mode):
+            return "it is not a directory"
+        # owned by root: only checked when running as root (the tests run as a normal user)
+        if os.geteuid() == 0 and st.st_uid != 0:
+            return "it is not owned by root (uid %d)" % st.st_uid
         return None
 
     def reserved(name):
@@ -107,27 +137,40 @@ def main(argv):
         for v in svc.get("volumes") or []:
             if v.get("type") != "bind":
                 continue
-            src = os.path.realpath(v.get("source") or "/")
-            if src == data_dir:
+            src = os.path.normpath(v.get("source") or "/")
+            if src in data_dirs or os.path.realpath(src) in data_dirs:
                 bad("data", w + ": volumes", "bind mount of the whole data directory %s" % src)
                 continue
-            if src.startswith(data_dir + "/"):
-                sub = src[len(data_dir) + 1:].split("/")[0]
-                if sub == "backups":
+            sub = rel_to(src, data_dirs)
+            if sub is not None:
+                if sub.split("/")[0] == "backups":
                     bad("data", w + ": volumes", "bind mount of %s (the backup manifest)" % src)
+                elif "/" in sub:
+                    bad("rules", w + ": volumes", "bind mount of %s — only one level (%s/<dir>), never a nested path"
+                                                 % (src, data_dir))
                 elif sub in DATA_OWNERS and DATA_OWNERS[sub] != name:
                     bad("rules", w + ": volumes", "%s is reserved for the %s service" % (src, DATA_OWNERS[sub]))
+                elif mount_root is not None:
+                    why = mount_problem(os.path.join(data_dir, sub))
+                    if why:
+                        bad("host", w + ": volumes", "%s/%s: %s" % (data_dir, sub, why))
                 continue
             rel = rel_in(src)
             if rel is None:
                 bad("host", w + ": volumes",
-                    "bind mount of %s (allowed: a subdirectory next to compose.yml, or %s/<dir>)" % (src, data_dir))
+                    "bind mount of %s (allowed: ./<dir> next to compose.yml, or %s/<dir>)" % (src, data_dir))
                 continue
             first = rel.split("/")[0]
             if reserved(first):
                 bad("rules", w + ": volumes", "bind mount of ./%s — reserved for the skill (secrets and state)" % rel)
+            elif "/" in rel:
+                bad("rules", w + ": volumes", "bind mount of ./%s — only one level (./<dir>), never a nested path" % rel)
             elif is_top_file(first):
                 bad("rules", w + ": volumes", "bind mount of the file ./%s — only subdirectories may be mounted" % first)
+            elif mount_root is not None:
+                why = mount_problem(os.path.join(mount_root, first))
+                if why:
+                    bad("host", w + ": volumes", "%s: %s" % (os.path.join(mount_root, first), why))
         for key in ("env_file", "label_file"):
             for item in svc.get(key) or []:
                 path = item.get("path") if isinstance(item, dict) else item

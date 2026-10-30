@@ -84,6 +84,25 @@ assert_contains "$(cat "$T/out")" "outside the compose directory" "server compos
 assert_eq "$([[ -e "$EDH_APP_DIR/compose.yml" ]] && echo installed || echo none)" "none" "server compose check: nothing installed"
 assert_contains "$(grep -c 'config --no-env-resolution --format json' "$T/docker.log")" "1" "server compose check: normalized config rendered"
 
+# a symlink planted where a bind source will be mounted (by a container with a read-write mount, say) is refused
+# before anything is installed: at <data>/<dir> and at <app dir>/<dir>
+mkdir -p "$EDH_DATA_DIR/backups" "$EDH_APP_DIR"
+ln -s "$EDH_DATA_DIR/backups" "$EDH_DATA_DIR/uploads"
+make_release "$T/rs" "echo migrated" 3000
+printf '  probe:\n    image: busybox\n    volumes:\n      - ${EDH_DATA_DIR:-/data}/uploads:/u\n' >> "$T/rs/app/compose.yml"
+rc=$(deploy "$T/rs" img:s)
+assert_status "$rc" 1 "server mount check: a symlink at <data>/uploads exits 1"
+assert_contains "$(cat "$T/out")" "symlink" "server mount check: <data> symlink explained"
+assert_eq "$([[ -e "$EDH_APP_DIR/compose.yml" ]] && echo installed || echo none)" "none" "server mount check: nothing installed"
+rm -f "$EDH_DATA_DIR/uploads"
+ln -s "$T" "$EDH_APP_DIR/extra"
+make_release "$T/rs2" "echo migrated" 3000
+printf '  probe:\n    image: busybox\n    volumes:\n      - ./extra:/e\n' >> "$T/rs2/app/compose.yml"
+rc=$(deploy "$T/rs2" img:s)
+assert_status "$rc" 1 "server mount check: a symlink at <app dir>/extra exits 1"
+assert_contains "$(cat "$T/out")" "$EDH_APP_DIR/extra" "server mount check: the installed path is named"
+rm -f "$EDH_APP_DIR/extra"
+
 # ============ first deploy, migration fails: nothing to fall back to and nothing was serving
 make_release "$T/r1" "exit 3" 3000
 rc=$(deploy "$T/r1" img:v1)

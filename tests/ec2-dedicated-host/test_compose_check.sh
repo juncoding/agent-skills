@@ -16,7 +16,26 @@ assert_contains "$(check "$(bind probe "$D/caddy")" --variables "$T/novars.json"
 out=$(check "$(bind probe "$D/notes.txt")" --variables "$T/novars.json")
 assert_contains "$out" "rc=1" "a top-level file next to compose.yml is refused"
 assert_contains "$out" "only subdirectories may be mounted" "a top-level file: explained"
-assert_contains "$(check "$(bind probe "$D/conf/x.txt")" --variables "$T/novars.json")" "rc=0" "a file inside a subdirectory is allowed"
+out=$(check "$(bind probe "$D/conf/x.txt")" --variables "$T/novars.json")
+assert_contains "$out" "rc=1" "a nested path next to compose.yml is refused (one level only)"
+assert_contains "$out" "one level" "a nested path: explained"
+# --mount-root: on the server each bind source is checked where it will really be mounted
+M="$T/installed"; mkdir -p "$M/extra" "$T/data/uploads" "$T/data/backups" "$T/elsewhere"
+ln -s "$T/data/backups" "$T/data/linked"
+ln -s "$T/elsewhere" "$M/planted"
+out=$(check "$(bind probe "$T/data/linked")" --data-dir "$T/data" --mount-root "$M" --variables "$T/novars.json")
+assert_contains "$out" "rc=1" "--mount-root: a symlink at <data>/<dir> is refused"
+assert_contains "$out" "symlink" "--mount-root: <data> symlink explained"
+out=$(check "$(bind probe "$D/planted")" --mount-root "$M" --variables "$T/novars.json")
+assert_contains "$out" "rc=1" "--mount-root: a symlink at <installed app dir>/<dir> is refused"
+assert_contains "$out" "$M/planted" "--mount-root: the installed path is named"
+assert_contains "$(check "$(bind probe "$D/extra")" --mount-root "$M" --variables "$T/novars.json")" "rc=0" \
+  "--mount-root: a real directory passes"
+assert_contains "$(check "$(bind probe "$D/newdir")" --mount-root "$M" --variables "$T/novars.json")" "rc=0" \
+  "--mount-root: a path that doesn't exist yet passes (Docker creates it)"
+: > "$M/afile"
+assert_contains "$(check "$(bind probe "$D/afile")" --mount-root "$M" --variables "$T/novars.json")" "not a directory" \
+  "--mount-root: an existing file where a directory is mounted is refused"
 # the server's data directory comes from --data-dir
 out=$(check "$(bind probe "$T/data/backups")" --data-dir "$T/data" --variables "$T/novars.json")
 assert_contains "$out" "backup manifest" "--data-dir: <data>/backups refused"
