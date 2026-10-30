@@ -895,7 +895,7 @@ case "$TAG" in
   manual) upload daily ;;
   *) die "unknown tag: $TAG" ;;
 esac
-metric BackupSuccess 1
+metric BackupFresh 1   # superseded: see the committed edh-backup.sh (heartbeat based on last upload)
 find "$EDH_DATA_DIR/backups" -name 'app-*.dump' -mmin +4320 -delete   # keep 3 days locally
 echo "$name"
 ```
@@ -2249,8 +2249,8 @@ add() {
     alarm "$r" cpu-credits-low "Burst credits nearly used up — consider a larger or m-family server" AWS/EC2 CPUCreditBalance "Name=InstanceId,Value=$EDH_IID" Minimum 300 1 50 LessThanThreshold missing
   fi
   alarm "$r" status-check "EC2 status check failing" AWS/EC2 StatusCheckFailed "Name=InstanceId,Value=$EDH_IID" Maximum 60 2 1 GreaterThanOrEqualToThreshold breaching
-  evals=2; if [[ "$EDH_BACKUP_SCHEDULE" == daily ]]; then evals=26; fi
-  alarm "$r" backup-stale "No successful database backup recently" EDH BackupSuccess "Name=Client,Value=$EDH_CLIENT Name=Env,Value=$EDH_ENV" Sum 3600 "$evals" 1 LessThanThreshold breaching
+  # edh-backup.sh publishes BackupFresh every hour while the last successful upload is within its schedule window
+  alarm "$r" backup-stale "Backups are not up to date" EDH BackupFresh "Name=Client,Value=$EDH_CLIENT Name=Env,Value=$EDH_ENV" Sum 3600 2 1 LessThanThreshold breaching
 
   aws route53 create-health-check --caller-reference "$REF" --health-check-config \
     "Type=HTTPS,FullyQualifiedDomainName=$EDH_DOMAIN,Port=443,ResourcePath=/health,RequestInterval=30,FailureThreshold=3,EnableSNI=true" >/dev/null 2>&1 || true
