@@ -3,6 +3,8 @@
 # Need = 768 MB base (OS, Caddy, Postgres) + app memory + 900 MB if Gotenberg.
 # Choose the smallest t4g whose RAM keeps >= 40 % headroom (need <= 60 % of RAM).
 
+# EDH_BASE_MB budgets roughly Caddy (256 MB limit) + Postgres (512 MB limit) from compose.yml; the OS itself
+# is covered by the 40 % headroom, so revisit this if those mem_limits change.
 EDH_BASE_MB=768
 EDH_GOTENBERG_MB=900
 

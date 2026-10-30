@@ -11,7 +11,8 @@
 			root /srv/maint
 			try_files /ON
 		}
-		not header Cookie *maint_bypass={$MAINT_BYPASS}*
+		# the exact cookie, not a substring: x_maint_bypass=... or a longer token must not pass
+		not header_regexp Cookie (?:^|;\s*)maint_bypass={$MAINT_BYPASS}(?:;|$)
 		not path /health
 	}
 
@@ -23,6 +24,7 @@
 		handle @maint {
 			root * /srv/maint
 			rewrite * /maintenance.html
+			method GET    # file_server only serves GET/HEAD; POST etc. would otherwise get an empty 405
 			header Retry-After 1800
 			header Cache-Control no-store
 			file_server {
@@ -37,6 +39,7 @@
 	handle_errors 502 503 504 {
 		root * /srv/maint
 		rewrite * /down.html
+		header Retry-After 30
 		header Cache-Control no-store
 		file_server {
 			status 503

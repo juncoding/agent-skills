@@ -46,6 +46,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    stop_grace_period: 60s                          # let Postgres shut down cleanly
     shm_size: 128m
     mem_limit: 512m
     logging: *logging

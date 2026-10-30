@@ -16,16 +16,20 @@ dc() { docker compose --project-directory "$EDH_APP_DIR" -f "$EDH_APP_DIR/compos
 # pg <sql> [database] — run SQL as the app superuser inside the postgres container
 pg() { dc exec -T postgres psql -v ON_ERROR_STOP=1 -U app -d "${2:-app}" -tAc "$1"; }
 
-# alert <subject> <message> — email through SNS when monitoring is on; always logged
+# alert <subject> <message> — email through SNS when monitoring is on; always logged. Never aborts.
 alert() {
   log "ALERT: $1 — $2"
   if [[ -z "${EDH_ALERT_TOPIC_ARN:-}" ]]; then return 0; fi
+  if [[ -z "${EDH_REGION:-}" ]]; then log "alert not sent: EDH_REGION is not set"; return 0; fi
   aws sns publish --region "$EDH_REGION" --topic-arn "$EDH_ALERT_TOPIC_ARN" \
     --subject "[${EDH_NAME:-edh}] $1" --message "$2" >/dev/null || log "sns publish failed"
 }
 
-# metric <name> [value] — custom metric in namespace EDH (watched by the backup alarm)
+# metric <name> [value] — custom metric in namespace EDH (watched by the backup alarm). Never aborts.
 metric() {
+  if [[ -z "${EDH_REGION:-}" || -z "${EDH_CLIENT:-}" || -z "${EDH_ENV:-}" ]]; then
+    log "metric $1 not published: EDH_REGION, EDH_CLIENT or EDH_ENV is not set"; return 0
+  fi
   aws cloudwatch put-metric-data --region "$EDH_REGION" --namespace EDH --metric-name "$1" \
     --dimensions "Client=$EDH_CLIENT,Env=$EDH_ENV" --value "${2:-1}" || log "metric $1 not published"
 }
@@ -40,4 +44,4 @@ wait_health() {
   return 1
 }
 
-html_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'; }
+html_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&#39;/g"; }
