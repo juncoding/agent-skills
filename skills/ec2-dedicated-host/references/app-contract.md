@@ -62,8 +62,17 @@ The app's environment is `app.env` on the server (mode 0600), rebuilt from SSM o
 - Values must not contain a newline or tab (refused). They are passed literally (`format: raw`): no `$`
   interpolation or quote handling.
 - A changed secret takes effect on the **next deploy**.
-- Nothing else is injected: non-secret settings the app needs (S3 bucket name, AWS region, Gotenberg URL,
-  public base URL…) are set the same way, e.g. `printf '%s' edh-acme-prod-uploads-123456789012 | secrets.sh set s3-bucket`.
+- **Defaults your app reads** — each added only when the app hasn't set the same name; override any by
+  setting a secret with that name (e.g. `secrets.sh set aws-region` → `AWS_REGION`):
+
+  | Variable | Value |
+  |---|---|
+  | `AWS_REGION` | the app region from `deploy.yml` (e.g. `ap-southeast-1`) |
+  | `EDH_UPLOADS_BUCKET` | `edh-<client>-<env>-uploads-<account>`, e.g. `edh-acme-prod-uploads-123456789012` |
+  | `GOTENBERG_URL` | `http://gotenberg:3000` — only with `uses_gotenberg: true` |
+
+- Any other non-secret setting the app needs (public base URL, feature flags…) is set the same way, e.g.
+  `printf '%s' https://app.example.com | secrets.sh set public-url` → `PUBLIC_URL`.
 
 Never print the environment (`docker inspect`, `env`, `printenv`, `cat app.env`): it holds the secrets.
 
@@ -72,8 +81,9 @@ Never print the environment (`docker inspect`, `env`, `printenv`, `cat app.env`)
 Bucket `edh-<client>-<env>-uploads-<account>` (versioned; deleted/overwritten versions kept 30 days).
 With `app_uses_instance_role: true` (default) the app container uses the server's IAM role through
 instance metadata — **no access keys**: the AWS SDK default credential chain finds it. Give the SDK the
-region (`AWS_REGION`) and bucket name through `secrets.sh`. With `false`, containers can't reach the role.
-Gotenberg (if `uses_gotenberg: true`) is at `http://gotenberg:3000` inside the Compose network.
+region and bucket from `AWS_REGION` and `EDH_UPLOADS_BUCKET` (see 4). With `false`, containers can't reach
+the role. Gotenberg (if `uses_gotenberg: true`) is at `GOTENBERG_URL` (`http://gotenberg:3000`) inside the
+Compose network.
 
 ## 6. Migrations: `migrate_cmd`, backward compatible
 

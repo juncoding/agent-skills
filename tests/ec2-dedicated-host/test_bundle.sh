@@ -29,6 +29,7 @@ set_vars=$(printf '%s\n' "$env" | sed -n 's/^\(EDH_[A-Z_]*\)=.*/\1/p' | sort -u)
 # defaults in edh-lib.sh or the script itself, script-internal names, and test-only overrides
 defaulted=" EDH_ENV_FILE EDH_APP_DIR EDH_DATA_DIR EDH_BIN_DIR EDH_DIE_LINE EDH_LOCK_FILE EDH_LOCK_HELD EDH_HEALTH_TRIES"
 defaulted="$defaulted EDH_HTTP_PORT EDH_HTTPS_PORT EDH_NO_SYSTEMD EDH_SKIP_PULL EDH_SKIP_PRUNE EDH_M EDH_U EDH_MANIFEST "
+defaulted="$defaulted EDH_UPLOADS_BUCKET "   # written into app.env for the app (app_env_defaults), never read
 missing=""
 for v in $(grep -ho 'EDH_[A-Z_]*' "$SKILL_DIR"/assets/host/edh-*.sh | sort -u); do
   if ! printf '%s\n' "$set_vars" | grep -qx "$v" && [[ "$defaulted" != *" $v "* ]]; then

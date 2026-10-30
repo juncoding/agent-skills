@@ -11,7 +11,7 @@ export EDH_HTTP_PORT=18081 EDH_HTTPS_PORT=18443
 REAL_DOCKER=$(command -v docker)
 cleanup() {
   docker compose -p $P down -v >/dev/null 2>&1
-  docker image rm edh-fixture:good2 edh-fixture:bad2 edh-fixture:broken >/dev/null 2>&1
+  docker image rm edh-fixture:good2 edh-fixture:bad2 edh-fixture:broken edh-test-caddy:pinned >/dev/null 2>&1
   rm -rf "$T"
 }
 trap cleanup EXIT
@@ -110,7 +110,15 @@ case "\$1 \$2" in
   *) exec "$REAL_DOCKER" "\$@" ;;
 esac
 EOS
-chmod +x "$T/flockbin/flock" "$T/mvbin/mv" "$T/imgbin/docker"
+# docker: logs `docker run` calls; FAIL_CONFIG_JSON=1 makes `compose … config --format json` fail
+mkdir -p "$T/runbin"
+cat > "$T/runbin/docker" <<EOS
+#!/bin/bash
+if [[ "\$1" == run ]]; then echo "\$*" >> "$T/run.log"; fi
+if [[ -n "\${FAIL_CONFIG_JSON:-}" && "\$*" == *"config --format json"* ]]; then echo "docker shim: config failed" >&2; exit 1; fi
+exec "$REAL_DOCKER" "\$@"
+EOS
+chmod +x "$T/flockbin/flock" "$T/mvbin/mv" "$T/imgbin/docker" "$T/runbin/docker"
 : > "$STUB_LOG"
 ssm_default
 make_release "$T/r1" "echo migrated"
@@ -124,6 +132,10 @@ out=$(cat "$T/out")
 assert_eq "$(site)" "fixture-ok" "site serves the app"
 assert_contains "$(cat "$T/app/app.env")" "API_KEY=secret-value" "app secrets mapped from SSM names"
 assert_contains "$(cat "$T/app/app.env")" "DATABASE_URL=postgres://app:pw123abc@postgres:5432/app" "DATABASE_URL injected"
+assert_contains "$(cat "$T/app/app.env")" "AWS_REGION=ap-southeast-1" "AWS_REGION injected"
+assert_contains "$(cat "$T/app/app.env")" "EDH_UPLOADS_BUCKET=edh-$P-uploads-123456789012" "EDH_UPLOADS_BUCKET injected"
+assert_not_contains "$(cat "$T/app/app.env")" "GOTENBERG_URL" "no GOTENBERG_URL without Gotenberg"
+assert_eq "$(dcx exec -T app printenv EDH_UPLOADS_BUCKET 2>&1)" "edh-$P-uploads-123456789012" "the app sees EDH_UPLOADS_BUCKET"
 assert_contains "$(cat "$T/app/app.env")" 'LITERAL_VALUE=p$HOME$EDH_UNSET_X' "a \$-value is written to app.env literally"
 assert_eq "$(dcx exec -T app printenv LITERAL_VALUE 2>&1)" 'p$HOME$EDH_UNSET_X' "a \$-value reaches the container literally"
 assert_not_contains "$out" "variable is not set" "no compose interpolation warning for secret values"
@@ -176,6 +188,21 @@ assert_status "$(deploy "$T/r3" edh-fixture:good)" 1 "invalid Caddyfile: deploy 
 assert_contains "$(cat "$T/out")" "Caddyfile" "invalid Caddyfile: explained"
 assert_eq "$(cmp -s "$T/Caddyfile.before" "$T/app/caddy/Caddyfile" && echo same)" "same" "invalid Caddyfile: old Caddyfile still installed"
 assert_eq "$(site)" "fixture-ok" "invalid Caddyfile: site still serves"
+# the Caddyfile is validated with the caddy image the release's compose.yml uses (here a local tag of the same
+# image, so nothing is pulled); caddy:2.10-alpine only when it can't be read
+docker tag caddy:2.10-alpine edh-test-caddy:pinned
+sed 's#image: caddy:2.10-alpine#image: edh-test-caddy:pinned#' "$SKILL_DIR/assets/project/compose.yml" > "$T/r3/app/compose.yml"
+: > "$T/run.log"
+step
+assert_status "$(PATH="$T/runbin:$PATH" deploy "$T/r3" edh-fixture:good)" 1 "pinned caddy, invalid Caddyfile: deploy exits 1"
+assert_contains "$(cat "$T/run.log")" "edh-test-caddy:pinned caddy validate" "Caddyfile validated with the caddy image compose.yml pins"
+assert_not_contains "$(cat "$T/run.log")" "caddy:2.10-alpine caddy validate" "the default caddy image is not used for a pinned one"
+: > "$T/run.log"
+step
+assert_status "$(FAIL_CONFIG_JSON=1 PATH="$T/runbin:$PATH" deploy "$T/r3" edh-fixture:good)" 1 "caddy image unreadable: deploy exits 1"
+assert_contains "$(cat "$T/run.log")" " caddy:2.10-alpine caddy validate" "caddy image unreadable: falls back to caddy:2.10-alpine"
+assert_contains "$(cat "$T/out")" "caddy:2.10-alpine" "caddy image unreadable: the fallback is logged"
+assert_eq "$(site)" "fixture-ok" "pinned caddy checks: site still serves"
 
 # ============ unhealthy image → rolled back, with the previous secrets
 sed 's/secret-value/secret-v2/' "$STUB_SSM" > "$T/ssm.v2" && cp "$T/ssm.v2" "$STUB_SSM"
@@ -197,11 +224,25 @@ assert_eq "$(site)" "fixture-ok" "unstartable image: old image serving"
 assert_eq "$(alerted "deploy rolled back")" "yes" "unstartable image: alert sent"
 
 # ============ failed migration
+# the release also changes compose.yml and the Caddyfile: like every abort before the switch, everything goes back
 make_release "$T/r2" "exit 3"
+awk '{ print } /image: caddy:2.10-alpine/ { print "    labels: { edh.test: migration-abort-marker }" }' \
+  "$SKILL_DIR/assets/project/compose.yml" > "$T/r2/app/compose.yml"
+printf '# migration-abort-marker\n' >> "$T/r2/app/Caddyfile"
+cp "$T/app/compose.yml" "$T/compose.before"; cp "$T/app/caddy/Caddyfile" "$T/Caddyfile.before"
+cp "$T/app/app.env" "$T/app.env.before"; cp "$T/app/.env" "$T/dotenv.before"
 step
 assert_status "$(deploy "$T/r2" edh-fixture:bad)" 1 "failed migration exits 1"
 assert_eq "$(img)" "edh-fixture:good" "failed migration keeps old image"
 assert_eq "$(alerted "deploy failed")" "yes" "failed migration: alert sent"
+assert_eq "$(cmp -s "$T/compose.before" "$T/app/compose.yml" && echo same)" "same" "failed migration: previous compose.yml restored"
+assert_eq "$(cmp -s "$T/Caddyfile.before" "$T/app/caddy/Caddyfile" && echo same)" "same" "failed migration: previous Caddyfile restored"
+assert_eq "$(cmp -s "$T/app.env.before" "$T/app/app.env" && cmp -s "$T/dotenv.before" "$T/app/.env" && echo same)" "same" \
+  "failed migration: previous app.env and .env restored"
+assert_eq "$(docker ps --filter "label=com.docker.compose.project=$P" --filter label=edh.test=migration-abort-marker -q | grep -c .)" "0" \
+  "failed migration: caddy re-upped with the previous compose.yml"
+assert_eq "$(site)" "fixture-ok" "failed migration: old version still serving"
+rm -f "$T/compose.before" "$T/Caddyfile.before" "$T/app.env.before" "$T/dotenv.before"
 
 # ============ abort after the infra step (postgres won't start with the release's compose.yml)
 make_release "$T/r4" "echo migrated"

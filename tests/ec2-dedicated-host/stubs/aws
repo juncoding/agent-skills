@@ -193,7 +193,7 @@ PY
   "route53 delete-health-check")
     id=$(optval --health-check-id)
     if [[ -f "$STUB_LOG.r53" ]]; then awk -F'\t' -v i="$id" '$1 != i' "$STUB_LOG.r53" > "$STUB_LOG.r53.new"; mv "$STUB_LOG.r53.new" "$STUB_LOG.r53"; fi ;;
-  "sns list-subscriptions-by-topic")   # STUB_SNS_SUBS: "endpoint<TAB>subscription-arn" lines (default: none)
+  "sns list-subscriptions-by-topic")   # STUB_SNS_SUBS: "protocol<TAB>endpoint<TAB>subscription-arn" lines (default: none)
     if [[ -n "${STUB_SNS_SUBS:-}" ]]; then printf '%s\n' "$STUB_SNS_SUBS"; else echo None; fi ;;
   "ec2 describe-snapshots")   # STUB_SNAP_TAGS: the snapshot's edh:client<TAB>edh:env (default: acme, prod)
     printf '%s\n' "${STUB_SNAP_TAGS:-acme	prod}" ;;

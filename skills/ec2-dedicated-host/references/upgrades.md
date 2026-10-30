@@ -26,15 +26,15 @@ The tags are pinned in `deploy/compose.yml`: `postgres:18-alpine`, `caddy:2.10-a
   therefore **not** refreshed by later deploys — changing the tag is what upgrades. Use a more specific tag
   to move on (`postgres:18.1-alpine`, `caddy:2.10.2-alpine`, `gotenberg/gotenberg:8.20`).
 - Deploy restarts the changed service before its pre-deploy dump, so take a backup first: `backup.sh now`.
-- If the deploy aborts before the switch, the previous configuration (and service tags) is put back —
-  except after a **failed migration**: then the new `compose.yml` and service images stay in place while
-  the old app version keeps serving. Fix forward, or revert the tag and deploy again.
+- If the deploy aborts before the switch — including a failed migration — the previous configuration
+  (`compose.yml`, Caddyfile, env files) is put back and Caddy/Postgres are restarted with it, so the old
+  service tags run again next to the old app version.
 
 **Postgres minor** (18.x → 18.y): tag change + deploy. Postgres restarts in seconds; the app reconnects.
 
-**Caddy**: tag change + deploy; certificates live in `/data/caddy` and survive. Limitation: the deploy
-validates the Caddyfile with `caddy:2.10-alpine` regardless of the tag, so a Caddyfile that needs newer
-Caddy features is rejected until `edh-deploy.sh` is updated.
+**Caddy**: tag change + deploy; certificates live in `/data/caddy` and survive. The deploy validates the
+Caddyfile with the caddy image that the release's `compose.yml` uses (falling back to `caddy:2.10-alpine`
+only if it can't read it, which it logs), so a new tag and a Caddyfile using its features ship together.
 
 **Gotenberg**: stateless; tag change + deploy, then test a PDF.
 

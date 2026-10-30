@@ -49,8 +49,10 @@ nothing from that topic.
 
 - `add` reports every unconfirmed address ("has not confirmed … check that inbox (and spam)") and doesn't
   subscribe it again. AWS deletes unconfirmed subscriptions after a few days; then `add` subscribes the address again.
-- `add` subscribes new addresses from `alert_emails` but **does not unsubscribe removed ones** — remove those
-  in the SNS console.
+- `add` keeps the subscriptions in step with `alert_emails`, in both regions: new addresses are subscribed,
+  and a **confirmed** address no longer listed is unsubscribed (reported). A **pending** one can't be removed
+  through the API: `add` reports it as pending; it expires unconfirmed. Addresses compare case-insensitively;
+  non-email subscriptions added by hand are left alone.
 
 Messages the server sends itself (app-region topic; with `monitoring: none` they are only logged): backup
 failed, deploy rolled back / failed / aborted, SITE DOWN after deploy or rollback, rollback failed, restore

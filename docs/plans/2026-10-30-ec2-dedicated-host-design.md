@@ -246,14 +246,17 @@ Building and reviewing the skill hardened it well beyond the design. The importa
   under maintenance and keeps the previous data (`app_pre_restore`). `restore disk` accepts only this
   project's snapshots (`--foreign-snapshot` to override) and prints exact recovery steps if interrupted.
 - **Deploy.** The release's compose file and Caddyfile are validated on the server before anything is
-  installed; the previous configuration is restored on any abort; rollback restores the env the old image ran
-  with. `deploy.sh` refuses compose files that expose `/data`, `/data/backups`, `/`, the Docker socket,
+  installed (the Caddyfile with the caddy image the release pins); the previous configuration — env files,
+  `compose.yml`, Caddyfile, and the Caddy/Postgres containers — is restored on any abort before the switch,
+  failed migrations included; rollback restores the env the old image ran with. The app gets `AWS_REGION`,
+  `EDH_UPLOADS_BUCKET` and (with Gotenberg) `GOTENBERG_URL` unless it sets them itself. `deploy.sh` refuses compose files that expose `/data`, `/data/backups`, `/`, the Docker socket,
   `..` paths, privileged mode or host namespaces. **Prod deploys must be exactly `origin/main`**
   (`--allow-non-main` for emergencies, with a warning and confirmation).
 - **Maintenance.** Exact bypass-cookie match, `/health` always reaches the app, `rotate-bypass`, the link goes
   to the terminal rather than logs; `deploy --maint` for risky migrations.
-- **Monitoring.** Route 53 health checks are tracked by tags (including `ManagedBy`), replaced safely on a
-  domain change; the CPU-credit alarm exists only on t-family servers. No EC2 auto-recovery action is
+- **Monitoring.** Email subscriptions follow `alert_emails` (removed confirmed addresses are unsubscribed,
+  pending ones reported). Route 53 health checks are tracked by tags (including `ManagedBy`), replaced safely
+  on a domain change; the CPU-credit alarm exists only on t-family servers. No EC2 auto-recovery action is
   configured by the skill. Known limitation: the CloudWatch agent package's signature is not verified.
 - **Secrets** are read from stdin and passed to AWS through 0600 temp files, never on a command line.
 - **Upgrades / resize.** `upgrade os` snapshots first and detects the reboot from SSM ping times; `resize`

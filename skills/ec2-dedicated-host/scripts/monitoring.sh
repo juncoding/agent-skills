@@ -14,13 +14,20 @@ WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 
 topic_arn() { printf 'arn:aws:sns:%s:%s:%s' "$1" "$ACCT" "$TOPIC"; }
 
-ensure_topic() { # ensure_topic <region> — the topic, and an email subscription per address (pending ones reported)
-  local arn e subs sub
+# ensure_topic <region> — the topic, and its email subscriptions synced with alert_emails: each listed address
+# subscribed (pending ones reported); a confirmed address no longer listed unsubscribed; a pending one, which the
+# API can't remove, reported (AWS deletes it unconfirmed). Addresses compare case-insensitively; other
+# protocols are left alone.
+ensure_topic() {
+  local arn e want="" subs sub proto ep
   arn=$(aws --region "$1" sns create-topic --name "$TOPIC" --tags "Key=edh:client,Value=$EDH_CLIENT" --query TopicArn --output text)
   subs=$(aws --region "$1" sns list-subscriptions-by-topic --topic-arn "$arn" \
-    --query 'Subscriptions[].[Endpoint,SubscriptionArn]' --output text)
+    --query 'Subscriptions[].[Protocol,Endpoint,SubscriptionArn]' --output text) \
+    || die "cannot list the subscriptions of $arn"
   for e in $(printf '%s' "$EDH_ALERT_EMAILS" | tr ',' ' '); do
-    sub=$(printf '%s\n' "$subs" | awk -F'\t' -v e="$e" '$1 == e { print $2; exit }')
+    e=$(printf '%s' "$e" | tr '[:upper:]' '[:lower:]')
+    want="$want $e "
+    sub=$(printf '%s\n' "$subs" | awk -F'\t' -v e="$e" '$1 == "email" && tolower($2) == e { print $3; exit }')
     if [[ -z "$sub" ]]; then
       aws --region "$1" sns subscribe --topic-arn "$arn" --protocol email --notification-endpoint "$e" >/dev/null
       warn "$e: AWS sent a 'Subscription Confirmation' email ($1) — click the link to receive alerts"
@@ -28,6 +35,17 @@ ensure_topic() { # ensure_topic <region> — the topic, and an email subscriptio
       warn "$e has not confirmed the alert subscription ($1) yet — check that inbox (and spam) for the AWS confirmation email"
     fi
   done
+  while IFS=$'\t' read -r proto ep sub <&3; do
+    [[ "$proto" == email ]] || continue
+    e=$(printf '%s' "$ep" | tr '[:upper:]' '[:lower:]')
+    [[ "$want" != *" $e "* ]] || continue
+    if [[ "$sub" == PendingConfirmation ]]; then
+      warn "$ep is no longer in alert_emails but its subscription ($1) is pending: it can't be removed by API and will expire unconfirmed"
+    elif [[ "$sub" == arn:aws:sns:* ]]; then
+      aws --region "$1" sns unsubscribe --subscription-arn "$sub" >/dev/null
+      ok "$ep is no longer in alert_emails: unsubscribed ($1)"
+    fi
+  done 3<<< "$subs"
 }
 
 # alarm <region> <suffix> <description> <namespace> <metric> <dims> <stat> <period> <evals> <threshold> <comparison> <missing>

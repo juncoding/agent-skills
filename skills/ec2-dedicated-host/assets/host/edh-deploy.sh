@@ -2,7 +2,8 @@
 # edh-deploy.sh <release-dir> <image> [--maint]
 # Runs ON the server as root (sent by deploy.sh via SSM). Installs the release's host scripts and config,
 # then swaps the app image: validate release → safety dump → migrations → up → /health → automatic rollback.
-# Exit: 0 deployed · 1 failed before the swap (old version still serving) · 2 unhealthy, rolled back · 3 site down
+# Exit: 0 deployed · 1 failed before the swap (old version still serving, previous configuration restored)
+#       · 2 unhealthy, rolled back · 3 site down
 # Every failure sends an alert. An unexpected exit restores the previous configuration (EXIT trap).
 set -Eeuo pipefail
 REL="${1:?release dir}"; IMAGE="${2:?image}"; MAINT="${3:-}"
@@ -42,6 +43,16 @@ restore_prev() { # restore_prev <file>... — put back the copies made by save_p
   for f in "$@"; do if [[ -f "$EDH_APP_DIR/$f.prev" ]]; then cp -p "$EDH_APP_DIR/$f.prev" "$EDH_APP_DIR/$f"; fi; done
 }
 
+# revert_infra — after restore_prev: caddy/postgres may already run from the release's files, so bring the
+# previous ones back (only if they were touched). Non-zero if the app then fails /health.
+revert_infra() {
+  (( INFRA )) || return 0
+  # shellcheck disable=SC2086
+  dc up -d --remove-orphans $services >/dev/null 2>&1 || log "could not restart $services with the previous configuration"
+  reload_caddy_once
+  wait_health
+}
+
 on_exit() {
   local rc=$? line="${EDH_DIE_LINE:-$1}"
   trap - EXIT
@@ -66,16 +77,10 @@ on_exit() {
     alert "SITE DOWN after deploy" "Deploying $IMAGE stopped unexpectedly at line $line (exit $rc) after the switch, and the restored previous version (${PREV:-none}) fails /health."
     exit 3
   fi
-  if (( INFRA )); then
-    # caddy/postgres may already run from the release's files: bring the previous ones back
-    # shellcheck disable=SC2086
-    dc up -d --remove-orphans $services >/dev/null 2>&1 || log "could not restart $services with the previous configuration"
-    reload_caddy_once
-    if ! wait_health; then
-      # with --maint, maintenance stays ON: users see the maintenance page rather than down.html
-      alert "SITE DOWN after deploy" "Deploying $IMAGE stopped at line $line (exit $rc) after $services were updated; with the previous configuration restored the app still fails /health."
-      exit 3
-    fi
+  if ! revert_infra; then
+    # with --maint, maintenance stays ON: users see the maintenance page rather than down.html
+    alert "SITE DOWN after deploy" "Deploying $IMAGE stopped at line $line (exit $rc) after $services were updated; with the previous configuration restored the app still fails /health."
+    exit 3
   fi
   finish_maint || true
   alert "deploy aborted at line $line" "Deploying $IMAGE failed before the switch (exit $rc); the previous version is still running. See the deploy output."
@@ -115,9 +120,9 @@ for p in params:
     sys.stdout.write(p["Name"] + "\t" + p.get("Value", "") + "\n")'
 
 # write_secrets — SSM <path>/<name> → app.env NAME (dashes → underscores, upper case); _edh/* is internal.
-# Values are never logged.
+# Then DATABASE_URL and the app_env_defaults, each only where the app hasn't set that name. Values are never logged.
 write_secrets() {
-  local params name value key k pg_pw="" bypass="" lines=""
+  local params name value key k pg_pw="" bypass="" lines="" defaults
   params=$(aws ssm get-parameters-by-path --region "$EDH_REGION" --path "$EDH_SSM_PATH/" --recursive \
     --with-decryption --output json | python3 -I -c "$PARSE_PARAMS") \
     || die "could not read the parameters under $EDH_SSM_PATH/ (see above)"
@@ -138,6 +143,9 @@ write_secrets() {
   if [[ "$lines" != *$'\n'DATABASE_URL=* && "$lines" != DATABASE_URL=* ]]; then
     lines="${lines}DATABASE_URL=postgres://app:${pg_pw}@postgres:5432/app"$'\n'
   fi
+  # AWS_REGION, EDH_UPLOADS_BUCKET, GOTENBERG_URL — unless the app set them itself
+  defaults=$(printf '%s' "$lines" | app_env_defaults)
+  if [[ -n "$defaults" ]]; then lines="$lines$defaults"$'\n'; fi
   printf '%s' "$lines" | write_env_file "$EDH_APP_DIR/app.env"
   printf 'POSTGRES_USER=app\nPOSTGRES_DB=app\nPOSTGRES_PASSWORD=%s\n' "$pg_pw" | write_env_file "$EDH_APP_DIR/postgres.env"
   MAINT_BYPASS="$bypass"
@@ -161,9 +169,25 @@ EDH_HTTPS_PORT=${EDH_HTTPS_PORT:-443}
 EOF
 }
 
+# caddy_image — the image of the caddy service in the staged compose.yml (so the Caddyfile is validated by the
+# Caddy version that will run it); caddy:2.10-alpine if it can't be read
+CADDY_IMAGE_PY='import json, re, sys
+img = (json.load(sys.stdin).get("services", {}).get("caddy") or {}).get("image") or ""
+print(img if re.match(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]*$", img) else "")'
+caddy_image() {
+  local img
+  img=$(docker compose --project-directory "$STAGE" -f "$STAGE/compose.yml" config --format json 2>/dev/null \
+    | python3 -I -c "$CADDY_IMAGE_PY" 2>/dev/null) || img=""
+  if [[ -z "$img" ]]; then
+    img=caddy:2.10-alpine
+    log "could not read the caddy image from the release's compose.yml: validating the Caddyfile with $img"
+  fi
+  printf '%s' "$img"
+}
+
 # validate_release — check the release's compose.yml and Caddyfile in a staging dir before installing anything
 validate_release() {
-  local out
+  local out caddy_img
   STAGE=$(mktemp -d)
   mkdir "$STAGE/caddy"
   cp "$REL/app/compose.yml" "$STAGE/compose.yml"
@@ -172,9 +196,10 @@ validate_release() {
   write_compose_env "${PREV:-$IMAGE}" "$STAGE"
   out=$(docker compose --project-directory "$STAGE" -f "$STAGE/compose.yml" config -q 2>&1) \
     || { printf '%s\n' "$out" | tail -20 >&2; die "the release's compose.yml is invalid — nothing installed"; }
+  caddy_img=$(caddy_image)
   # values through the environment, not the command line; the token is masked in any error output
   out=$(DOMAIN="$EDH_DOMAIN" MAINT_BYPASS="$MAINT_BYPASS" APP_PORT="${EDH_APP_PORT:-3000}" \
-    docker run --rm -e DOMAIN -e MAINT_BYPASS -e APP_PORT -v "$STAGE/caddy:/etc/caddy:ro" caddy:2.10-alpine \
+    docker run --rm -e DOMAIN -e MAINT_BYPASS -e APP_PORT -v "$STAGE/caddy:/etc/caddy:ro" "$caddy_img" \
     caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1) \
     || { printf '%s\n' "$out" | sed "s/$MAINT_BYPASS/<bypass-token>/g" | tail -20 >&2
          die "the release's Caddyfile is invalid — nothing installed"; }
@@ -278,9 +303,17 @@ fi
 if [[ -n "${EDH_MIGRATE_CMD:-}" ]]; then
   log "running migrations with $IMAGE"
   if ! migrate; then
-    restore_prev app.env postgres.env   # the running version keeps its secrets
+    # like every abort before the switch: the previous configuration back (env files, compose.yml, Caddyfile),
+    # and caddy/postgres re-upped with it; the old app version keeps serving
+    log "migrations failed: restoring the previous configuration"
+    # shellcheck disable=SC2086
+    restore_prev $KEPT
+    if ! revert_infra; then
+      alert "SITE DOWN after deploy" "Migrations failed for $IMAGE, and with the previous configuration restored the app fails /health."
+      done_exit 3
+    fi
     finish_maint
-    alert "deploy failed" "Migrations failed for $IMAGE. The previous version is still running."
+    alert "deploy failed" "Migrations failed for $IMAGE. The previous version is still running with its previous configuration."
     done_exit 1
   fi
 fi

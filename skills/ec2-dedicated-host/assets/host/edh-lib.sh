@@ -82,3 +82,19 @@ html_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
+
+# app_env_defaults — app.env lines so far on stdin; prints the defaults the app gets for names it hasn't set
+# itself through SSM (a secret of the same name always wins): AWS_REGION, EDH_UPLOADS_BUCKET (this client's
+# uploads bucket; left out without a valid account id) and, with Gotenberg, GOTENBERG_URL.
+app_env_defaults() {
+  local have
+  have=$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p')
+  set_default() { if ! printf '%s\n' "$have" | grep -qx "$1"; then printf '%s=%s\n' "$1" "$2"; fi; }
+  if [[ -n "${EDH_REGION:-}" ]]; then set_default AWS_REGION "$EDH_REGION"; fi
+  if [[ -n "${EDH_NAME:-}" && "${EDH_ACCOUNT_ID:-}" =~ ^[0-9]{12}$ ]]; then
+    set_default EDH_UPLOADS_BUCKET "edh-${EDH_NAME}-uploads-${EDH_ACCOUNT_ID}"
+  else
+    log "EDH_NAME or EDH_ACCOUNT_ID not set: EDH_UPLOADS_BUCKET not added to app.env"
+  fi
+  if [[ "${EDH_USES_GOTENBERG:-false}" == true ]]; then set_default GOTENBERG_URL http://gotenberg:3000; fi
+}

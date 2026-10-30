@@ -133,16 +133,38 @@ assert_contains "$out" "could not create the Route 53 health check" "a failing h
 
 # ============ alert emails: unconfirmed subscriptions are reported, not subscribed again
 : > "$T/log"
-out=$(STUB_SNS_SUBS="ops@example.com	PendingConfirmation" mon add); rc=$?
+out=$(STUB_SNS_SUBS="email	ops@example.com	PendingConfirmation" mon add); rc=$?
 assert_contains "$out" "ops@example.com has not confirmed" "a pending subscription is reported"
 assert_eq "$(grep -c 'sns subscribe' "$T/log")" "0" "a pending subscription is not subscribed again"
 : > "$T/log"
-out=$(STUB_SNS_SUBS="ops@example.com	arn:aws:sns:ap-southeast-1:123456789012:edh-acme-prod-alerts:1234" mon add); rc=$?
+out=$(STUB_SNS_SUBS="email	ops@example.com	arn:aws:sns:ap-southeast-1:123456789012:edh-acme-prod-alerts:1234" mon add); rc=$?
 assert_not_contains "$out" "has not confirmed" "a confirmed subscription is not reported"
 assert_eq "$(grep -c 'sns subscribe' "$T/log")" "0" "a confirmed subscription is not subscribed again"
 : > "$T/log"
 out=$(mon add); rc=$?
 assert_eq "$(grep -c 'sns subscribe' "$T/log")" "2" "a new address is subscribed (app region and us-east-1)"
+
+# ============ subscriptions follow alert_emails: confirmed addresses no longer listed are unsubscribed (both
+# regions), pending ones can't be (API) and are reported; other protocols are left alone
+A=arn:aws:sns:ap-southeast-1:123456789012:edh-acme-prod-alerts
+subs="email	ops@example.com	$A:keep
+email	old@example.com	$A:old1
+email	OPS@EXAMPLE.COM	$A:case
+email	gone@example.com	PendingConfirmation
+https	https://hooks.example.com/x	$A:hook"
+: > "$T/log"
+out=$(STUB_SNS_SUBS="$subs" mon add); rc=$?
+assert_status $rc 0 "add with a removed address succeeds"
+assert_eq "$(grep -c "sns unsubscribe --subscription-arn $A:old1" "$T/log")" "2" "a removed confirmed address is unsubscribed (app region and us-east-1)"
+assert_contains "$(grep "sns unsubscribe" "$T/log" | grep -- '--region us-east-1')" "$A:old1" "unsubscribed in us-east-1 too"
+assert_contains "$out" "old@example.com" "the unsubscribed address is reported"
+assert_eq "$(grep -c "sns unsubscribe --subscription-arn $A:keep" "$T/log")" "0" "a listed address stays subscribed"
+assert_eq "$(grep -c "sns unsubscribe --subscription-arn $A:case" "$T/log")" "0" "addresses compare case-insensitively"
+assert_eq "$(grep -c "$A:hook" "$T/log")" "0" "non-email subscriptions are left alone"
+assert_contains "$out" "gone@example.com" "a removed pending address is reported"
+assert_contains "$out" "pending" "a removed pending address: reported as pending"
+assert_contains "$out" "expire" "a removed pending address: will expire"
+assert_eq "$(grep -c 'sns subscribe ' "$T/log")" "0" "nothing new to subscribe"
 
 # ============ status is read-only; add/remove refuse another account
 : > "$T/log"
