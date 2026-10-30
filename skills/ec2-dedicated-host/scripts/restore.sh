@@ -5,9 +5,10 @@
 #     The server restores only backups in its own backup manifest (/data/backups/manifest.tsv, written by its
 #     backup job): that exact S3 version, checked against its sha256. A compromised app can add objects to the
 #     bucket, but not to the manifest. --latest and --date are resolved from the manifest by the server.
-#     --unverified  also restore a backup that is not in the manifest (warned and alerted); --latest/--date then
-#                   choose from the bucket listing by upload time. Only for when the manifest is gone (it lives on
-#                   the data volume, so normally it survives a rebuilt server) — see references/backup-restore.md.
+#     --unverified  also restore a backup that is not in the manifest (warned and alerted). Needs --key: nothing
+#                   unverified is ever chosen automatically (backup.sh list shows the keys). The key is still checked
+#                   against its S3 upload time. Only for when the manifest is gone (it lives on the data volume, so
+#                   normally it survives a rebuilt server) — see references/backup-restore.md.
 # restore.sh disk --snapshot snap-... [--foreign-snapshot]
 #     replace the whole data volume from a snapshot (app offline a few minutes). Only snapshots tagged
 #     edh:client/edh:env of this project; --foreign-snapshot (with a confirmation) allows any other.
@@ -19,7 +20,7 @@ ACCT=$(aws_account)
 require_instance
 BUCKET="${EDH_PREFIX}-backups-${ACCT}"
 
-# pick_backup <YYYY-MM-DD or ""> [exact-key] — choose a dump by its S3 upload time (LastModified), never by the
+# pick_backup <YYYY-MM-DD or ""> [exact-key] — (--unverified --key only, called with an exact key) choose a dump by its S3 upload time (LastModified), never by the
 # timestamp in its name: the server's role (and an app container using it) can upload any key under db/, e.g.
 # db/daily/app-29991231T000000Z.dump, which would win any sort by name. Skipped, with a warning naming them:
 # names dated more than 5 min in the future, and names more than 2 h from their upload time (uploads follow the
@@ -87,15 +88,19 @@ case "${1:-}" in
       esac
     done
     [[ ${#mode} == 1 ]] || die "give exactly one of --date, --key or --latest"
+    # an unverified backup is never chosen automatically: the operator names the exact key
+    if [[ -n "$unv" && "$mode" != k ]]; then
+      die "--unverified needs --key db/<tier>/app-YYYYMMDDTHHMMSSZ.dump (not --latest or --date): name the exact backup (backup.sh list shows them) — see references/backup-restore.md"
+    fi
     # the key goes into the remote command: only a well-formed dump key is accepted
     if [[ -n "$key" && ! "$key" =~ $KEY_RE ]]; then
       die "not a backup key: '$key' (expected db/<hourly|daily|monthly|safety>/app-YYYYMMDDTHHMMSSZ.dump)"
     fi
     if [[ -n "$unv" ]]; then
-      # not verified by the server: choose from the bucket by upload time, with the timestamp sanity checks
+      # not verified by the server: the named key must exist, with the timestamp sanity checks on its upload time
       require_python
-      sel=$(pick_backup "$date" "$key")
-      [[ -n "$sel" ]] || die "no matching backup found${key:+ (or $key was skipped: see above)}"
+      sel=$(pick_backup "" "$key")
+      [[ -n "$sel" ]] || die "backup $key not found in s3://$BUCKET (or skipped: see above)"
       key=$(printf '%s' "$sel" | cut -f1)
       [[ "$key" =~ $KEY_RE ]] || die "unexpected backup key: '$key'"
       log "backup $key — uploaded $(printf '%s' "$sel" | cut -f2), $(printf '%s' "$sel" | cut -f3) bytes (NOT verified against the server's backup manifest)"
@@ -162,7 +167,7 @@ systemctl start docker
 cd /opt/edh/app && docker compose up -d
 systemctl start edh-backup.timer edh-drill.timer
 . /opt/edh/bin/edh-lib.sh
-wait_health 60 || { echo 'the app does not pass /health'; exit 1; }"
+wait_health 60 || { echo 'the app does not pass /health'; exit 4; }"   # 4: everything is up but the app is unhealthy
     rc=0
     ssm_run "$EDH_IID" 900 'set -e
 . /opt/edh/bin/edh-lib.sh
@@ -206,8 +211,14 @@ EOR
     awsr ec2 attach-volume --volume-id "$new_id" --instance-id "$EDH_IID" --device /dev/sdf >/dev/null
     awsr ec2 wait volume-in-use --volume-ids "$new_id"
     # A volume restored from a snapshot keeps the filesystem UUID, so the existing fstab entry still matches.
-    ssm_run "$EDH_IID" 600 "${up_script//VOLID/${new_id//-/}}" \
-      || die "the new data volume $new_id is attached but the app is not healthy — run status.sh. The old volume $old_id is detached and kept (tagged data-replaced)."
+    rc=0
+    ssm_run "$EDH_IID" 600 "${up_script//VOLID/${new_id//-/}}" || rc=$?
+    if (( rc == 4 )); then
+      # the swap itself completed: the half-way recovery guidance would mislead
+      trap - EXIT
+      die "the data volume swap completed ($new_id is attached and mounted at /data, the app was started), but the app is unhealthy — run status.sh and check the app's logs. The old volume $old_id is detached and kept (tagged data-replaced)."
+    fi
+    (( rc == 0 )) || die "bringing the server back on the new data volume $new_id failed (exit $rc) — see the output above"
     trap - EXIT
     ok "data volume replaced: $new_id (old $old_id kept, tagged data-replaced — delete it by hand once satisfied)" ;;
   *) die "usage: restore.sh db (--date YYYY-MM-DD | --key db/... | --latest) [--check] [--unverified] | disk --snapshot snap-... [--foreign-snapshot]" ;;

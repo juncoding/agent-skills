@@ -35,6 +35,9 @@ case "${1:-}" in
     awsr ec2 wait instance-stopped --instance-ids "$EDH_IID"
     if ! start_as "$new"; then
       warn "could not change to or start as $new: going back to $cur"
+      # the type can only be changed while the server is stopped (a failed start may leave it pending or stopping)
+      awsr ec2 wait instance-stopped --instance-ids "$EDH_IID" \
+        || die "the server did not settle in the stopped state after the failed start as $new — check it in the EC2 console (it is $cur or $new)"
       start_as "$cur" || die "the server is STOPPED: it could not be started as $new nor as $cur — start it in the console"
       die "EC2 refused $new (type change or start, e.g. no capacity) — the server is back on $cur and running"
     fi

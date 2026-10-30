@@ -108,6 +108,27 @@ for m in '- /data:/hostdata' '- "/data/:/hostdata"' '- ${EDH_DATA_DIR:-/data}:/d
   assert_eq "$(grep -c buildx "$T/log.docker")$(calls put-object)" "00" "compose mount '$m': nothing built or shipped"
   cp "$T/compose.save" deploy/compose.yml
 done
+# no container may get at the server itself
+for m in '- /:/host' '- "/:/host:ro"' 'source: /' '- /var/run/docker.sock:/var/run/docker.sock' '- /run/docker.sock:/d.sock' \
+         '- ../secrets:/s' '- ${EDH_DATA_DIR:-/data}/caddy/../backups:/b' '- "..:/up"' 'privileged: true' 'privileged: "true"' \
+         'pid: host' 'network_mode: host' 'network_mode: "host"'; do
+  cp deploy/compose.yml "$T/compose.save"
+  printf '    %s\n' "$m" >> deploy/compose.yml
+  : > "$T/log"; : > "$T/log.docker"
+  out=$(run deploy.sh --allow-dirty); rc=$?
+  assert_status $rc 1 "compose '$m' refused"
+  assert_contains "$out" "access to the server itself" "compose '$m': explained"
+  assert_eq "$(grep -c buildx "$T/log.docker")$(calls put-object)" "00" "compose '$m': nothing built or shipped"
+  cp "$T/compose.save" deploy/compose.yml
+done
+# ordinary settings still pass
+cp deploy/compose.yml "$T/compose.save"
+printf '    %s\n' 'privileged: false' 'network_mode: bridge' '# - /var/run/docker.sock:/x (a comment)' \
+  '- "${EDH_DATA_DIR:-/data}/uploads:/uploads"' 'command: ["echo", "Loading..."]' >> deploy/compose.yml
+: > "$T/log"
+out=$(run deploy.sh --allow-dirty); rc=$?
+assert_status $rc 0 "compose with ordinary settings (privileged: false, a data subdirectory, a comment) deploys"
+cp "$T/compose.save" deploy/compose.yml
 assert_eq "$(git status --porcelain)" "" "compose.yml restored after the mount tests"
 touch untracked
 out=$(run deploy.sh); rc=$?
@@ -264,41 +285,44 @@ out=$(EDH_YES=1 STUB_SSM_RC=1 run restore.sh db --key "$KEY_A"); rc=$?
 assert_status $rc 1 "edh-restore failure: restore fails"
 assert_contains "$out" "failed" "edh-restore failure: explained"
 
-# --unverified: chosen from the bucket listing by S3 upload time (LastModified), never by the name's timestamp —
-# the host role (and an app container using it) can upload any key under db/, e.g. app-29991231T000000Z.dump
+# --unverified needs --key: an unverified backup is never chosen automatically (no --latest / --date)
 export STUB_S3_LIST="$T/objects"
+for sel in "--latest" "--date $DATE_X1"; do
+  : > "$T/log"
+  # shellcheck disable=SC2086
+  out=$(EDH_YES=1 run restore.sh db $sel --check --unverified); rc=$?
+  assert_status $rc 1 "--unverified with $sel refused"
+  assert_contains "$out" "--unverified needs --key" "--unverified with $sel: explained"
+  assert_eq "$(grep -v 'sts get-caller-identity' "$T/log" | grep -cE 'send-command|list-objects-v2')" "0" "--unverified with $sel: nothing listed or sent"
+done
+# --unverified --key: the named key is still checked against its S3 upload time
 : > "$T/log"
-out=$(run restore.sh db --latest --check --unverified); rc=$?
-assert_status $rc 0 "restore --latest --unverified succeeds"
-assert_eq "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_B --keep --unverified" "--unverified --latest: the newest genuine upload wins"
-assert_contains "$out" "skipping $KEY_C" "--unverified: a future-named key is skipped"
-assert_contains "$out" "$KEY_C: its name is dated in the future" "--unverified: future-named key: explained"
-assert_contains "$out" "skipping $KEY_D" "--unverified: a key whose name doesn't match its upload time is skipped"
+out=$(run restore.sh db --key "$KEY_B" --check --unverified); rc=$?
+assert_status $rc 0 "restore --key --unverified succeeds"
+assert_eq "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_B --keep --unverified" "--unverified --key: that key, flag passed through"
 assert_contains "$out" "backup $KEY_B" "--unverified: prints the chosen key"
 assert_contains "$out" "3000 bytes" "--unverified: prints the chosen dump's size"
+assert_contains "$out" "NOT verified" "--unverified: says it is not verified"
 assert_contains "$(grep list-objects-v2 "$T/log")" "--expected-bucket-owner 123456789012" "--unverified lists only this account's bucket"
 : > "$T/log"
-out=$(EDH_YES=1 run restore.sh db --latest --unverified); rc=$?
+out=$(EDH_YES=1 run restore.sh db --key "$KEY_B" --unverified); rc=$?
 assert_eq "$(script_n 1)" "/opt/edh/bin/edh-restore.sh replace $KEY_B --yes --unverified" "--unverified passed through (replace)"
 assert_contains "$out" "--unverified" "--unverified is warned about before the confirmation"
+for k in "$KEY_C:its name is dated in the future" "$KEY_D:its name says"; do
+  : > "$T/log"
+  out=$(EDH_YES=1 run restore.sh db --key "${k%%:*}" --unverified); rc=$?
+  assert_status $rc 1 "--unverified --key ${k%%:*} refused"
+  assert_contains "$out" "skipping ${k%%:*}: ${k#*:}" "--unverified --key ${k%%:*}: explained"
+  assert_eq "$(calls 'ssm send-command')" "0" "--unverified --key ${k%%:*}: nothing sent"
+done
 : > "$T/log"
-out=$(run restore.sh db --date "$DATE_X1" --check --unverified); rc=$?
-assert_eq "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_A --keep --unverified" "--unverified --date matches on the upload date"
-: > "$T/log"
-out=$(run restore.sh db --date "$DATE_X" --check --unverified); rc=$?
-assert_status $rc 1 "--unverified --date of the name's day (not the upload's): nothing"
-assert_eq "$(calls 'ssm send-command')" "0" "--unverified --date without a match: nothing sent"
-: > "$T/log"
-out=$(EDH_YES=1 run restore.sh db --key "$KEY_C" --unverified); rc=$?
-assert_status $rc 1 "--unverified --key of a future-named dump refused"
-assert_eq "$(calls 'ssm send-command')" "0" "--unverified --key of a future-named dump: nothing sent"
-: > "$T/log"
-out=$(run restore.sh db --key "$KEY_A" --check --unverified); rc=$?
-assert_eq "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_A --keep --unverified" "--unverified --key of a genuine dump"
+out=$(run restore.sh db --key "db/daily/app-20200101T000000Z.dump" --check --unverified); rc=$?
+assert_status $rc 1 "--unverified --key of a key not in the bucket refused"
+assert_contains "$out" "not found" "--unverified --key not in the bucket: explained"
 # python3 must really run (on a Mac without the Command Line Tools, python3 is only a stub)
 mkdir -p "$T/nopy"; printf '#!/bin/sh\necho "xcode-select: note: no developer tools were found" >&2\nexit 1\n' > "$T/nopy/python3"; chmod +x "$T/nopy/python3"
 : > "$T/log"
-out=$(PATH="$T/nopy:$PATH" run restore.sh db --latest --check --unverified); rc=$?
+out=$(PATH="$T/nopy:$PATH" run restore.sh db --key "$KEY_A" --check --unverified); rc=$?
 assert_status $rc 1 "--unverified without a working python3 fails"
 assert_contains "$out" "python3" "--unverified without a working python3: explained"
 assert_eq "$(calls 'ssm send-command')" "0" "--unverified without a working python3: nothing sent"
@@ -361,6 +385,21 @@ assert_contains "$out" "aws --region ap-southeast-1 ec2 attach-volume --volume-i
 assert_contains "$out" "aws --region ap-southeast-1 ec2 create-tags --resources vol-stub --tags Key=edh:role,Value=data Key=edh:snapshot,Value=acme-prod" \
   "restore disk: attach fails: the command to re-tag the old volume"
 assert_contains "$out" "sudo mount -a && sudo systemctl start docker" "restore disk: attach fails: how to bring the app back"
+# the swap completed but the app fails /health: no misleading "stopped half way" guidance
+: > "$T/log"; rm -f "$T/log.rcn"
+out=$(EDH_YES=1 STUB_VOL_ATTACHED=i-stub STUB_SSM_RCS="0 4" run restore.sh disk --snapshot snap-0123abcd); rc=$?
+assert_status $rc 1 "restore disk: unhealthy after the swap: fails"
+assert_contains "$out" "swap completed" "restore disk: unhealthy after the swap: says the swap completed"
+assert_contains "$out" "app is unhealthy" "restore disk: unhealthy after the swap: says the app is unhealthy"
+assert_not_contains "$out" "stopped half way" "restore disk: unhealthy after the swap: no half-way recovery guidance"
+assert_not_contains "$out" "To put the old volume back" "restore disk: unhealthy after the swap: no put-back commands"
+assert_contains "$(script_n 2)" "exit 4" "restore disk: the health check failure has its own exit code"
+# anything else failing on the way back up still prints the recovery guidance
+: > "$T/log"; rm -f "$T/log.rcn"
+out=$(EDH_YES=1 STUB_VOL_ATTACHED=i-stub STUB_SSM_RCS="0 1" run restore.sh disk --snapshot snap-0123abcd); rc=$?
+assert_status $rc 1 "restore disk: /data not mounted after the swap: fails"
+assert_contains "$out" "stopped half way" "restore disk: /data not mounted after the swap: recovery guidance"
+rm -f "$T/log.rcn"
 
 # ============ resize
 : > "$T/log"
@@ -393,6 +432,8 @@ assert_contains "$out" "back on t4g.medium" "resize: the new type does not start
 assert_eq "$(grep modify-instance-attribute "$T/log" | sed -n 's/.*--instance-type Value=\([^ ]*\).*/\1/p' | tr '\n' ' ')" "m7g.large t4g.medium " \
   "resize: the new type does not start: the old type is set back"
 assert_eq "$(calls start-instances)" "2" "resize: the new type does not start: started again on the old type"
+assert_eq "$(( $(line_of 'wait instance-stopped' 2) > $(line_of start-instances 1) && $(line_of 'wait instance-stopped' 2) < $(line_of modify-instance-attribute 2) ))" "1" \
+  "resize: the new type does not start: waits for the server to be stopped before setting the old type back"
 assert_eq "$(calls 'ssm send-command')" "0" "resize: the new type does not start: no health check on a half-done resize"
 sed 's/^monitoring: .*/monitoring: none/' deploy/deploy.yml > "$T/nomon.yml"; cp deploy/deploy.yml "$T/mon.yml"; cp "$T/nomon.yml" deploy/deploy.yml
 : > "$T/log"
@@ -422,18 +463,31 @@ assert_contains "$out" "kept until you delete it" "upgrade says the snapshot is 
 out=$(EDH_YES=1 STUB_SSM_OUT=REBOOT-NEEDED run upgrade.sh os); rc=$?
 assert_contains "$out" "a reboot is needed" "upgrade: a needed reboot is reported"
 assert_not_contains "$(scripts)" "systemctl reboot" "upgrade without --reboot never reboots"
-: > "$T/log"
-out=$(EDH_YES=1 STUB_SSM_OUT=REBOOT-NEEDED EDH_REBOOT_POLL_SECONDS=0 run upgrade.sh os --reboot); rc=$?
+: > "$T/log"; rm -f "$T/log.pingn"
+# the reboot is detected by a ping newer than the one recorded just before it — never by the Mac's clock: these
+# pings are from the year 2000, so comparing them with the Mac's clock would never see the server back
+printf 'Online\t2000-01-01T00:00:00.000000+00:00\nOnline\t2000-01-01T00:00:00.000000+00:00\nOnline\t2000-01-01T00:06:00.000000+00:00\n' > "$T/pings"
+out=$(EDH_YES=1 STUB_SSM_OUT=REBOOT-NEEDED EDH_REBOOT_POLL_SECONDS=0 STUB_PINGS="$T/pings" run upgrade.sh os --reboot); rc=$?
 assert_status $rc 0 "upgrade --reboot succeeds"
 assert_eq "$(in_order "$(scripts)" "systemctl reboot" "wait_health")" ok "upgrade --reboot: reboot, then health check"
 assert_contains "$(grep describe-instance-information "$T/log")" "LastPingDateTime" "upgrade --reboot waits for a fresh SSM ping"
+assert_eq "$(( $(line_of describe-instance-information 1) < $(line_of 'ssm send-command' 2) ))" "1" \
+  "upgrade --reboot: the last ping is recorded before the reboot command"
+assert_eq "$(cat "$T/log.pingn")" "3" "upgrade --reboot: back on the first newer ping"
 assert_contains "$out" "rebooted and healthy" "upgrade --reboot: reported"
-: > "$T/log"
-out=$(EDH_YES=1 STUB_SSM_OUT=REBOOT-NEEDED EDH_REBOOT_POLL_SECONDS=0 STUB_PING="Online	2000-01-01T00:00:00.000000+00:00" \
+# a quick reboot that is seen offline, then Online with an unchanged ping, also counts
+: > "$T/log"; rm -f "$T/log.pingn"
+printf 'Online\t2026-10-30T10:00:00.123+00:00\nConnectionLost\t2026-10-30T10:00:00.123+00:00\nOnline\t2026-10-30T10:00:00.123+00:00\n' > "$T/pings"
+out=$(EDH_YES=1 STUB_SSM_OUT=REBOOT-NEEDED EDH_REBOOT_POLL_SECONDS=0 STUB_PINGS="$T/pings" run upgrade.sh os --reboot); rc=$?
+assert_status $rc 0 "upgrade --reboot: offline then Online counts as back"
+# the ping never moves on and the server never goes offline: not back
+: > "$T/log"; rm -f "$T/log.pingn"
+out=$(EDH_YES=1 STUB_SSM_OUT=REBOOT-NEEDED EDH_REBOOT_POLL_SECONDS=0 STUB_PING="Online	2099-01-01T00:00:00.000000+00:00" \
   run upgrade.sh os --reboot); rc=$?
-assert_status $rc 1 "upgrade --reboot: an old ping never counts as back"
+assert_status $rc 1 "upgrade --reboot: a ping no newer than before the reboot never counts as back"
 assert_contains "$out" "did not come back" "upgrade --reboot: not back: explained"
 assert_not_contains "$(scripts)" "wait_health" "upgrade --reboot: not back: no health check sent"
+rm -f "$T/log.pingn"
 : > "$T/log"
 out=$(run upgrade.sh os </dev/null); rc=$?
 assert_eq "$(grep -cE 'create-snapshot|send-command' "$T/log")" "0" "upgrade without consent changes nothing"

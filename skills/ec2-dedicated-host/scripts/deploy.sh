@@ -77,7 +77,23 @@ check_prod_source() {
   confirm "Deploy branch '${branch:-detached HEAD}' at $head (not origin/main) to PROD $EDH_NAME?"
 }
 
+# Nor may a container get at the host itself: the root directory, the Docker socket, paths with "..", privileged
+# mode, or the host's process or network namespace. A best-effort lint of the file as written (values hidden in
+# variables are not resolved), not a sandbox.
+check_compose_host_access() {
+  local q="'" hits
+  hits=$(grep -v '^[[:space:]]*#' deploy/compose.yml | grep -nE \
+    -e "(^|[[:space:]\"$q-])/[\"$q]?:" \
+    -e "source:[[:space:]]*[\"$q]?/[\"$q]?[[:space:]]*(#.*)?\$" \
+    -e 'docker\.sock' \
+    -e '(\.\./|/\.\.([/"'"$q"':[:space:]]|$)|(^|[[:space:]"'"$q"'])\.\.["'"$q"']?(:|[[:space:]]*$))' \
+    -e "^[[:space:]]*privileged:[[:space:]]*[\"$q]?([Tt]rue|TRUE|[Yy]es|YES|on|ON)" \
+    -e "^[[:space:]]*(pid|network_mode):[[:space:]]*[\"$q]?host" || true)
+  [[ -z "$hits" ]] || die "deploy/compose.yml gives a container access to the server itself — refusing. Not allowed: mounting / or the Docker socket, paths containing '..', privileged: true, pid: host, network_mode: host (see references/app-contract.md):
+$hits"
+}
 check_compose_mounts
+check_compose_host_access
 SHA=$(git rev-parse --short=12 HEAD) || die "not a git repository (run from the project root)"
 if [[ -n "$(git status --porcelain)" ]]; then
   (( DIRTY_OK )) || die "uncommitted changes — commit first, or pass --allow-dirty"

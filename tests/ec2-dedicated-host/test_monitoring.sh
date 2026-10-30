@@ -81,7 +81,7 @@ assert_not_contains "$s" "get-parameter" "agent install reads no secrets"
 rm -f "$T/log.r53"*; : > "$T/log"
 out=$(mon add); rc=$?
 assert_status $rc 0 "add creates the health check"
-assert_eq "$(cut -f2- "$T/log.r53")" "app.example.com	/health	acme	prod" "health check: domain, /health, tagged edh:client and edh:env"
+assert_eq "$(cut -f2- "$T/log.r53")" "app.example.com	/health	acme	prod	ec2-dedicated-host" "health check: domain, /health, tagged edh:client, edh:env and ManagedBy"
 hc=$(cut -f1 "$T/log.r53")
 assert_contains "$(grep put-metric-alarm "$T/log" | grep site-down)" "Name=HealthCheckId,Value=$hc" "site-down alarm watches the health check"
 : > "$T/log"
@@ -99,15 +99,31 @@ printf 'hc-99\tapp.example.com\t/health\tother\tprod\n' >> "$T/log.r53"
 out=$(mon add); rc=$?
 assert_eq "$(grep -c 'hc-99' "$T/log.r53")" "1" "another client's health check is left alone"
 assert_not_contains "$(grep put-metric-alarm "$T/log" | grep site-down)" "hc-99" "another client's health check is not used"
-# domain changed: this client's old check is replaced
-old_hc=$(awk -F'\t' '$4 == "acme" { print $1 }' "$T/log.r53")
+# a check with this client's tags but not ManagedBy=ec2-dedicated-host (made by hand) is neither used nor deleted
+printf 'hc-98\tapp.example.com\t/health\tacme\tprod\tNone\n' >> "$T/log.r53"
+: > "$T/log"
+out=$(mon add); rc=$?
+assert_eq "$(grep -c 'hc-98' "$T/log.r53")" "1" "an unmanaged health check with this client's tags is left alone"
+assert_not_contains "$(grep put-metric-alarm "$T/log" | grep site-down)" "hc-98" "an unmanaged health check is not used"
+assert_not_contains "$(cat "$T/log")" "delete-health-check --health-check-id hc-98" "an unmanaged health check is not deleted"
+# domain changed: this client's old check is replaced — the new one is created first, then the old one deleted
+old_hc=$(awk -F'\t' '$4 == "acme" && $6 == "ec2-dedicated-host" { print $1 }' "$T/log.r53")
 sed 's/^domain: .*/domain: new.example.com/' "$SKILL_DIR/assets/project/deploy.yml" > deploy/deploy.yml
 : > "$T/log"
 out=$(mon add); rc=$?
 assert_status $rc 0 "domain change: add succeeds"
 assert_contains "$out" "app.example.com" "domain change: says which check is replaced"
 assert_contains "$(cat "$T/log")" "delete-health-check --health-check-id $old_hc" "domain change: the old check is deleted"
-assert_eq "$(awk -F'\t' '$4 == "acme" { print $2 }' "$T/log.r53")" "new.example.com" "domain change: one check, for the new domain"
+c=$(grep -n create-health-check "$T/log" | head -1 | cut -d: -f1); d=$(grep -n delete-health-check "$T/log" | head -1 | cut -d: -f1)
+assert_eq "$(( c > 0 && c < d ))" "1" "domain change: the new check is created before the old one is deleted"
+assert_eq "$(awk -F'\t' '$4 == "acme" && $6 == "ec2-dedicated-host" { print $2 }' "$T/log.r53")" "new.example.com" "domain change: one check, for the new domain"
+cp "$SKILL_DIR/assets/project/deploy.yml" deploy/deploy.yml
+# domain change with a failing create: the old check is kept
+sed 's/^domain: .*/domain: other.example.com/' "$SKILL_DIR/assets/project/deploy.yml" > deploy/deploy.yml
+: > "$T/log"
+out=$(STUB_R53_FAIL=1 mon add); rc=$?
+assert_status $rc 1 "domain change, create fails: add fails"
+assert_eq "$(grep -c delete-health-check "$T/log")" "0" "domain change, create fails: the old check is not deleted"
 cp "$SKILL_DIR/assets/project/deploy.yml" deploy/deploy.yml
 # a failing create is not swallowed
 rm -f "$T/log.r53"*

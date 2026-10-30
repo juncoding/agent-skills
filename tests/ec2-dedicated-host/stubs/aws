@@ -139,7 +139,15 @@ PY
         b64=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' "$STUB_LOG.ssm-params" 2>/dev/null || true)
         if [[ -n "$b64" ]]; then printf '%s' "$b64" | base64 --decode; echo; else echo stub-output; fi ;;
       *"--query StandardErrorContent"*) echo None ;;
-      *"--query ResponseCode"*) echo "${STUB_SSM_RC:-0}" ;;
+      *"--query ResponseCode"*)
+        # STUB_SSM_RCS="0 4": the nth command's exit code (count in $STUB_LOG.rcn); after the list, STUB_SSM_RC
+        if [[ -n "${STUB_SSM_RCS:-}" ]]; then
+          n=$(( $(cat "$STUB_LOG.rcn" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STUB_LOG.rcn"
+          # shellcheck disable=SC2086
+          set -- $STUB_SSM_RCS
+          if (( n <= $# )); then echo "${!n}"; exit 0; fi
+        fi
+        echo "${STUB_SSM_RC:-0}" ;;
       *) echo Success ;;
     esac ;;
   "ec2 describe-tags")
@@ -150,7 +158,7 @@ PY
       *) echo None ;;
     esac ;;
   "ecr get-login-password") echo stub ;;
-  # --- route53: health checks kept in $STUB_LOG.r53 ("id<TAB>domain<TAB>path<TAB>client<TAB>env"); a caller
+  # --- route53: health checks kept in $STUB_LOG.r53 ("id<TAB>domain<TAB>path<TAB>client<TAB>env<TAB>managed-by"); a caller
   # reference can be used once ever, like in Route 53 (even after the check is deleted)
   "route53 create-health-check")
     ref=$(optval --caller-reference); cfg=$(optval --health-check-config)
@@ -162,23 +170,24 @@ PY
     n=$(( $(cat "$STUB_LOG.r53n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STUB_LOG.r53n"
     d=$(printf '%s' "$cfg" | tr ',' '\n' | sed -n 's/^FullyQualifiedDomainName=//p')
     p=$(printf '%s' "$cfg" | tr ',' '\n' | sed -n 's/^ResourcePath=//p')
-    printf 'hc-%s\t%s\t%s\tNone\tNone\n' "$n" "$d" "$p" >> "$STUB_LOG.r53"
+    printf 'hc-%s\t%s\t%s\tNone\tNone\tNone\n' "$n" "$d" "$p" >> "$STUB_LOG.r53"
     echo "hc-$n" ;;
   "route53 list-health-checks")
     if [[ -s "$STUB_LOG.r53" ]]; then cut -f1-3 "$STUB_LOG.r53"; else echo None; fi ;;
-  "route53 list-tags-for-resources")   # one "id<TAB>edh:client<TAB>edh:env" row per requested id
+  "route53 list-tags-for-resources")   # one "id<TAB>edh:client<TAB>edh:env<TAB>ManagedBy" row per requested id
     i=0; ids=()
     while (( i < ${#clean[@]} )); do
       if [[ "${clean[$i]}" == --resource-ids ]]; then
         i=$((i + 1)); while (( i < ${#clean[@]} )) && [[ "${clean[$i]}" != --* ]]; do ids+=("${clean[$i]}"); i=$((i + 1)); done
       else i=$((i + 1)); fi
     done
-    for id in "${ids[@]}"; do awk -F'\t' -v i="$id" '$1 == i { print $1 "\t" $4 "\t" $5 }' "$STUB_LOG.r53" 2>/dev/null; done ;;
+    for id in "${ids[@]}"; do awk -F'\t' -v i="$id" '$1 == i { print $1 "\t" $4 "\t" $5 "\t" ($6 == "" ? "None" : $6) }' "$STUB_LOG.r53" 2>/dev/null; done ;;
   "route53 change-tags-for-resource")
     id=$(optval --resource-id); c=$(printf '%s ' "${clean[@]}" | sed -n 's/.*Key=edh:client,Value=\([^ ]*\).*/\1/p')
     e=$(printf '%s ' "${clean[@]}" | sed -n 's/.*Key=edh:env,Value=\([^ ]*\).*/\1/p')
+    mb=$(printf '%s ' "${clean[@]}" | sed -n 's/.*Key=ManagedBy,Value=\([^ ]*\).*/\1/p')
     if [[ -f "$STUB_LOG.r53" ]]; then
-      awk -F'\t' -v OFS='\t' -v i="$id" -v c="${c:-}" -v e="${e:-}" '$1 == i { if (c != "") $4 = c; if (e != "") $5 = e } { print }' \
+      awk -F'\t' -v OFS='\t' -v i="$id" -v c="${c:-}" -v e="${e:-}" -v m="${mb:-}" '$1 == i { if (c != "") $4 = c; if (e != "") $5 = e; if (m != "") $6 = m } { print }' \
         "$STUB_LOG.r53" > "$STUB_LOG.r53.new" && mv "$STUB_LOG.r53.new" "$STUB_LOG.r53"
     fi ;;
   "route53 delete-health-check")
@@ -248,8 +257,16 @@ PY
             *) echo i-stub ;;
           esac ;;
         describe-instance-information)   # STUB_PING: "PingStatus<TAB>LastPingDateTime" (default: Online, far future)
+          # STUB_PINGS: a file of such lines, one per query in turn (count in $STUB_LOG.pingn; the last one repeats)
           case "$*" in
-            *LastPingDateTime*) printf '%s\n' "${STUB_PING:-Online	2099-01-01T00:00:00.000000+00:00}" ;;
+            *LastPingDateTime*)
+              if [[ -n "${STUB_PINGS:-}" ]]; then
+                n=$(( $(cat "$STUB_LOG.pingn" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STUB_LOG.pingn"
+                total=$(grep -c . "$STUB_PINGS"); if (( n > total )); then n=$total; fi
+                sed -n "${n}p" "$STUB_PINGS"
+              else
+                printf '%s\n' "${STUB_PING:-Online	2099-01-01T00:00:00.000000+00:00}"
+              fi ;;
             *) echo Online ;;
           esac ;;
         describe-volumes-modifications) echo optimizing ;;

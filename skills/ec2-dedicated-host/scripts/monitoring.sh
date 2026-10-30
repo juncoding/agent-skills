@@ -41,8 +41,9 @@ alarm() {
 }
 
 # our_health_checks — this client's Route 53 health checks, "id<TAB>domain<TAB>path" per line: found by their
-# edh:client / edh:env tags, never by caller reference (Route 53 never lets a reference be reused, even after the
-# check is deleted, so every create gets a new one).
+# edh:client / edh:env tags plus ManagedBy=ec2-dedicated-host (a check someone made by hand with the same client
+# tags is never used or deleted), never by caller reference (Route 53 never lets a reference be reused, even
+# after the check is deleted, so every create gets a new one).
 our_health_checks() {
   local all ids tags line id
   all=$(aws route53 list-health-checks \
@@ -56,27 +57,27 @@ our_health_checks() {
   set -- $ids
   while (( $# > 0 )); do   # at most 10 ids per call
     line=$(aws route53 list-tags-for-resources --resource-type healthcheck --resource-ids "${@:1:10}" \
-      --query 'ResourceTagSets[].[ResourceId,Tags[?Key==`edh:client`]|[0].Value,Tags[?Key==`edh:env`]|[0].Value]' --output text) \
+      --query 'ResourceTagSets[].[ResourceId,Tags[?Key==`edh:client`]|[0].Value,Tags[?Key==`edh:env`]|[0].Value,Tags[?Key==`ManagedBy`]|[0].Value]' --output text) \
       || die "cannot read the tags of the Route 53 health checks"
     tags="$tags$line"$'\n'
     if (( $# > 10 )); then shift 10; else shift $#; fi
   done
-  for id in $(printf '%s' "$tags" | awk -F'\t' -v c="$EDH_CLIENT" -v e="$EDH_ENV" '$2 == c && $3 == e { print $1 }'); do
+  for id in $(printf '%s' "$tags" | awk -F'\t' -v c="$EDH_CLIENT" -v e="$EDH_ENV" '$2 == c && $3 == e && $4 == "ec2-dedicated-host" { print $1 }'); do
     printf '%s\n' "$all" | awk -F'\t' -v i="$id" '$1 == i'
   done
 }
 
 # ensure_health_check — HC = this client's check of https://<domain>/health, created if missing. This client's
-# checks for anything else (the domain changed) are deleted.
+# checks for anything else (the domain changed) are deleted — only once the new one exists, so a failed create
+# never leaves the client without a check.
 ensure_health_check() {
-  local rows id d p ref
+  local rows id d p ref stale=""
   HC=""
   rows=$(our_health_checks)
   while IFS=$'\t' read -r id d p <&3; do
     [[ -n "$id" ]] || continue
     if [[ -z "$HC" && "$d" == "$EDH_DOMAIN" && "$p" == /health ]]; then HC="$id"; continue; fi
-    warn "deleting Route 53 health check $id for https://$d$p (this client's, but not https://$EDH_DOMAIN/health — the domain changed?)"
-    aws route53 delete-health-check --health-check-id "$id"
+    stale="$stale$id"$'\t'"https://$d$p"$'\n'
   done 3<<< "$rows"
   if [[ -z "$HC" ]]; then
     ref="${EDH_PREFIX}-site-$(date +%s)-$(gen_secret 8)"   # unique: a reference can never be used twice
@@ -88,6 +89,11 @@ ensure_health_check() {
   fi
   aws route53 change-tags-for-resource --resource-type healthcheck --resource-id "$HC" --add-tags "Key=Name,Value=$EDH_PREFIX" \
     "Key=edh:client,Value=$EDH_CLIENT" "Key=edh:env,Value=$EDH_ENV" "Key=Client,Value=$EDH_CLIENT" "Key=ManagedBy,Value=ec2-dedicated-host" >/dev/null
+  while IFS=$'\t' read -r id d <&3; do
+    [[ -n "$id" ]] || continue
+    warn "deleting Route 53 health check $id for $d (this client's, but not https://$EDH_DOMAIN/health — the domain changed?)"
+    aws route53 delete-health-check --health-check-id "$id"
+  done 3<<< "$stale"
 }
 
 # The agent may publish only into this client's namespace CWAgent/<name> (inline policy edh-cwagent). Never the

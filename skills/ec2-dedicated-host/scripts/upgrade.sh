@@ -21,23 +21,36 @@ ok "safety snapshot $snap (kept until you delete it by hand)"
 
 # ping_epoch <LastPingDateTime> — seconds since the epoch (0 if unreadable)
 ping_epoch() {
-  python3 -I -c 'import datetime, sys
+  python3 -I -c 'import datetime, re, sys
+s = re.sub(r"Z$", "+00:00", sys.argv[1].strip())
+s = re.sub(r"[.][0-9]+", "", s)   # fractions of a second: their width varies, and they do not matter here
 try:
-    print(int(datetime.datetime.fromisoformat(sys.argv[1]).timestamp()))
+    t = datetime.datetime.fromisoformat(s)
+    print(int(t.timestamp()) if t.tzinfo else 0)
 except ValueError:
     print(0)' "$1"
 }
-# wait_back <epoch> — after the reboot: SSM must report the server down (anything but Online) and Online again,
-# or Online with a ping newer than <epoch> (a quick reboot may never show as down between two polls)
+# last_ping — the SSM agent's LastPingDateTime for the server, in seconds since the epoch (0 if unreadable).
+# Both sides of the comparison come from AWS: the Mac's clock never enters it.
+last_ping() {
+  local info
+  info=$(awsr ssm describe-instance-information --filters "Key=InstanceIds,Values=$EDH_IID" \
+    --query 'InstanceInformationList[0].[PingStatus,LastPingDateTime]' --output text 2>/dev/null || true)
+  ping_epoch "$(printf '%s' "$info" | cut -f2)"
+}
+# wait_back <ping-before-the-reboot> — after the reboot: SSM must report the server down (anything but Online)
+# and Online again, or Online with a ping newer than the one recorded just before the reboot (a quick reboot may
+# never show as down between two polls). Without a readable earlier ping, only down-then-Online counts.
 wait_back() {
-  local t0="$1" down=0 info st ping _
+  local before="$1" down=0 info st ping _
   for _ in $(seq 1 180); do
     sleep "${EDH_REBOOT_POLL_SECONDS:-5}"
     info=$(awsr ssm describe-instance-information --filters "Key=InstanceIds,Values=$EDH_IID" \
       --query 'InstanceInformationList[0].[PingStatus,LastPingDateTime]' --output text 2>/dev/null || true)
     st=$(printf '%s' "$info" | cut -f1); ping=$(printf '%s' "$info" | cut -f2)
     if [[ "$st" != Online ]]; then down=1; continue; fi
-    if (( down )) || (( $(ping_epoch "$ping") > t0 )); then return 0; fi
+    if (( down )); then return 0; fi
+    if (( before > 0 && $(ping_epoch "$ping") > before )); then return 0; fi
   done
   die "the server did not come back on SSM within 15 min of the reboot — check it in the EC2 console (safety snapshot $snap)"
 }
@@ -48,9 +61,11 @@ out=$(ssm_run "$EDH_IID" 1800 'export DEBIAN_FRONTEND=noninteractive; apt-get -o
   || { printf '%s\n' "$out"; die "the OS upgrade failed (safety snapshot $snap) — see the output above"; }
 echo "$out"
 if printf '%s\n' "$out" | grep -qx REBOOT-NEEDED && (( REBOOT )); then
+  # a ping is "after the reboot" only if newer than the agent's last ping recorded just before it
+  before=$(last_ping)
+  if (( before == 0 )); then warn "cannot read the server's last SSM ping: waiting for it to go offline and come back"; fi
   ssm_run "$EDH_IID" 60 'nohup sh -c "sleep 3; systemctl reboot" >/dev/null 2>&1 &' || true
-  # a ping is "after the reboot" only if newer than this: the reboot starts 3 s after the command
-  wait_back $(( $(date +%s) + 10 ))
+  wait_back "$before"
   ssm_run "$EDH_IID" 300 "$HEALTH" || die "rebooted, but the app is not healthy — run status.sh (safety snapshot $snap)"
   ok "rebooted and healthy"
 else
