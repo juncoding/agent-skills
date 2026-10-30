@@ -261,6 +261,12 @@ render_aws() {
       "$EDH_SKILL_DIR/assets/aws/$1"
 }
 
+# require_python — a python3 that really runs (on a Mac without the Command Line Tools, python3 is only a stub)
+require_python() {
+  require python3
+  python3 -c '' >/dev/null 2>&1 || die "python3 does not run (on macOS install the Command Line Tools: xcode-select --install)"
+}
+
 # render_cwagent — the CloudWatch agent config for this client: it publishes into namespace CWAgent/<name>
 # (EDH_NAME is derived from the validated client and env). The agent's own ${aws:InstanceId} stays as it is.
 render_cwagent() { sed "s#__NAME__#$EDH_NAME#g" "$EDH_SKILL_DIR/assets/host/cwagent.json"; }

@@ -62,12 +62,6 @@ for line in sys.stdin.read().splitlines():
         best = (lm, key, lm_text, size)
 if best:
     print("\t".join(best[1:]))'
-# need_python — python3 that really runs (on a Mac without the Command Line Tools, python3 is only a stub)
-need_python() {
-  require python3
-  python3 -c '' >/dev/null 2>&1 || die "python3 does not run (on macOS install the Command Line Tools: xcode-select --install)"
-}
-
 pick_backup() {
   local rows
   rows=$(awsr s3api list-objects-v2 --bucket "$BUCKET" --prefix "${2:-db/}" --expected-bucket-owner "$ACCT" \
@@ -99,7 +93,7 @@ case "${1:-}" in
     fi
     if [[ -n "$unv" ]]; then
       # not verified by the server: choose from the bucket by upload time, with the timestamp sanity checks
-      need_python
+      require_python
       sel=$(pick_backup "$date" "$key")
       [[ -n "$sel" ]] || die "no matching backup found${key:+ (or $key was skipped: see above)}"
       key=$(printf '%s' "$sel" | cut -f1)

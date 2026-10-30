@@ -19,7 +19,7 @@ case "$cmd" in
   set)
     check_name "${2:-}"
     v=""
-    if [[ -t 0 ]]; then read -r -s -p "value for $2: " v || true; echo >&2; else v=$(cat); fi
+    if [[ -t 0 ]]; then IFS= read -r -s -p "value for $2: " v || true; echo >&2; else v=$(cat); fi
     [[ -n "$v" ]] || die "empty value"
     # the server refuses values with a newline or tab when it writes app.env: refuse them here already
     case "$v" in *$'\n'*|*$'\r'*|*$'\t'*) die "the value must not contain a newline or tab" ;; esac

@@ -4,7 +4,8 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/s3"
 # fake docker / curl / dig: no image is built, no network is used
 printf '#!/bin/sh\necho "docker $*" >> "$STUB_LOG.docker"\ncase "$1" in login) cat >/dev/null ;; esac\nexit 0\n' > "$T/bin/docker"
-printf '#!/bin/sh\nexit ${FAKE_CURL_RC:-0}\n' > "$T/bin/curl"
+# curl: like the real one, -w still prints "000 ..." when the request fails
+printf '#!/bin/sh\nif [ "${FAKE_CURL_RC:-0}" != 0 ]; then printf "000 in 0.001s"; fi\nexit ${FAKE_CURL_RC:-0}\n' > "$T/bin/curl"
 printf '#!/bin/sh\necho 203.0.113.10\n' > "$T/bin/dig"
 chmod +x "$T/bin/"*
 export PATH="$T/bin:$TESTS_DIR/stubs:$PATH" STUB_LOG="$T/log" STUB_S3="$T/s3" STUB_MODE=existing EDH_SSM_POLL_SECONDS=0
@@ -48,6 +49,7 @@ secrets.sh set db-pass
 secrets.sh delete db-pass
 maint.sh on
 maint.sh off
+maint.sh rotate-bypass
 rollback.sh
 backup.sh now
 restore.sh db --latest
@@ -85,12 +87,26 @@ assert_not_contains "$s" "with-decryption" "remote deploy command holds no secre
 : > "$T/log"
 out=$(run deploy.sh --maint); rc=$?
 assert_contains "$(script_n 1)" "$img --maint" "--maint is passed to edh-deploy.sh"
-for c in "1:previous version is still serving" "2:rolled back to the previous version" "3:site may be down" "7:site may be down"; do
+for c in "1:previous version is still serving" "2:rolled back to the previous version" "3:no healthy version is running" \
+         "3:site may be down" "7:site may be down"; do
   out=$(STUB_SSM_RC=${c%%:*} run deploy.sh); rc=$?
   assert_status $rc 1 "edh-deploy exit ${c%%:*}: deploy fails"
   assert_contains "$out" "${c#*:}" "edh-deploy exit ${c%%:*}: '${c#*:}'"
   assert_not_contains "$out" "live:" "edh-deploy exit ${c%%:*}: not reported live"
 done
+# no container may mount the backups directory (the backup manifest) or the whole data directory
+for m in '- /data:/hostdata' '- "/data/:/hostdata"' '- ${EDH_DATA_DIR:-/data}:/d' '- ${EDH_DATA_DIR:-/data}/backups:/b:ro' \
+         '- /data/backups:/b' 'source: /data' "source: '\${EDH_DATA_DIR:-/data}'"; do
+  cp deploy/compose.yml "$T/compose.save"
+  printf '      %s\n' "$m" >> deploy/compose.yml
+  : > "$T/log"; : > "$T/log.docker"
+  out=$(run deploy.sh --allow-dirty); rc=$?
+  assert_status $rc 1 "compose mount '$m' refused"
+  assert_contains "$out" "backup manifest" "compose mount '$m': explained"
+  assert_eq "$(grep -c buildx "$T/log.docker")$(calls put-object)" "00" "compose mount '$m': nothing built or shipped"
+  cp "$T/compose.save" deploy/compose.yml
+done
+assert_eq "$(git status --porcelain)" "" "compose.yml restored after the mount tests"
 touch untracked
 out=$(run deploy.sh); rc=$?
 assert_status $rc 1 "uncommitted changes: deploy refuses"
@@ -138,7 +154,33 @@ out=$(run maint.sh on --message "Back soon"); rc=$?
 assert_status $rc 0 "maint on succeeds"
 assert_contains "$(script_n 1)" "/opt/edh/bin/edh-maint.sh on --message Back\\ soon" "maint on runs edh-maint.sh with the message"
 assert_contains "$(grep disable-alarm-actions "$T/log")" "--region us-east-1 cloudwatch disable-alarm-actions --alarm-names edh-acme-prod-site-down" "maint on pauses the site-down alarm"
-assert_contains "$out" "https://erp.acme.com/?maint_bypass=" "maint on shows the bypass link"
+# the link goes to the terminal when there is one (else stderr), so it doesn't end up in captured output
+assert_contains "$(grep get-parameter "$T/log")" "--name /acme/prod/_edh/maint-bypass --with-decryption" "maint on reads the bypass token for the link"
+: > "$T/log"
+out=$(run maint.sh on --no-link); rc=$?
+assert_status $rc 0 "maint on --no-link succeeds"
+assert_eq "$(calls 'get-parameter')" "0" "maint on --no-link does not read the bypass token"
+assert_not_contains "$out" "maint_bypass=" "maint on --no-link shows no link"
+assert_eq "$(script_n 1)" "/opt/edh/bin/edh-maint.sh on " "--no-link is not passed to the server"
+# the message reaches the server as one literal argument: no expansion, no extra commands
+msg=$'a $(touch '"$T"$'/pwned1) `touch '"$T"$'/pwned2`; touch '"$T"$'/pwned3\nline2 "dq" \'sq\' \\ end'
+: > "$T/log"
+out=$(run maint.sh on --message "$msg" --no-link); rc=$?
+s=$(script_n 1)
+lit=$(S="$s" M="$msg" /bin/bash -c 'eval "set -- $S"; if [[ $# == 4 && "$1" == /opt/edh/bin/edh-maint.sh && "$2" == on && "$3" == --message && "$4" == "$M" ]]; then echo literal; fi' 2>&1)
+assert_eq "$lit" "literal" "maint message with \$(), backticks, ;, newline and quotes decodes to a literal argv"
+assert_eq "$(ls "$T" | grep -c pwned)" "0" "maint message: nothing in it was executed"
+: > "$T/log"
+out=$(run maint.sh rotate-bypass); rc=$?
+assert_status $rc 0 "maint rotate-bypass succeeds"
+f="$T/log.params/_acme_prod__edh_maint-bypass"
+assert_eq "$([[ "$(cat "$f" 2>/dev/null)" =~ ^[0-9a-f]{40}$ ]] && echo hex40)" "hex40" "rotate-bypass stores a new 40-hex token"
+assert_eq "$(wc -c < "$f" 2>/dev/null | tr -d ' ')" "40" "rotate-bypass: no trailing newline"
+assert_not_contains "$(cat "$T/log")" "$(cat "$f" 2>/dev/null)" "rotate-bypass: the token is not on the command line"
+assert_contains "$(grep put-parameter "$T/log")" "--type SecureString --value file://" "rotate-bypass: passed by file"
+assert_contains "$(grep put-parameter "$T/log")" "--overwrite" "rotate-bypass overwrites the old token"
+assert_contains "$out" "deploy.sh" "rotate-bypass says to deploy to apply it"
+assert_eq "$(calls 'ssm send-command')" "0" "rotate-bypass sends nothing to the server"
 : > "$T/log"
 out=$(run maint.sh off); rc=$?
 assert_contains "$(grep enable-alarm-actions "$T/log")" "edh-acme-prod-site-down" "maint off resumes the site-down alarm"
@@ -365,17 +407,40 @@ assert_status $rc 0 "resize disk succeeds"
 assert_contains "$(cat "$T/log")" "modify-volume --volume-id vol-stub --size 40" "resize disk grows the volume"
 assert_contains "$(script_n 1)" "resize2fs /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_volstub" "resize disk grows the filesystem"
 
-# ============ upgrade: safety snapshot before any package changes
+# ============ upgrade: safety snapshot before any package changes; health check after
 : > "$T/log"
-out=$(EDH_YES=1 run upgrade.sh os); rc=$?
+out=$(EDH_YES=1 STUB_SSM_OUT=NO-REBOOT run upgrade.sh os); rc=$?
 assert_status $rc 0 "upgrade os succeeds"
 assert_eq "$(( $(line_of 'create-snapshot --volume-id vol-stub') < $(line_of 'ssm send-command') ))" "1" "upgrade: safety snapshot first"
 assert_contains "$(script_n 1)" "apt-get -o DPkg::Lock::Timeout=600" "upgrade waits for the dpkg lock"
+assert_contains "$(script_n 1)" "--with-new-pkgs upgrade" "upgrade installs new dependencies (--with-new-pkgs)"
+assert_contains "$(script_n 2)" "wait_health" "upgrade without a reboot: health check"
+assert_contains "$out" "kept until you delete it" "upgrade says the snapshot is kept"
+: > "$T/log"
+out=$(EDH_YES=1 STUB_SSM_OUT=REBOOT-NEEDED run upgrade.sh os); rc=$?
+assert_contains "$out" "a reboot is needed" "upgrade: a needed reboot is reported"
+assert_not_contains "$(scripts)" "systemctl reboot" "upgrade without --reboot never reboots"
+: > "$T/log"
+out=$(EDH_YES=1 STUB_SSM_OUT=REBOOT-NEEDED EDH_REBOOT_POLL_SECONDS=0 run upgrade.sh os --reboot); rc=$?
+assert_status $rc 0 "upgrade --reboot succeeds"
+assert_eq "$(in_order "$(scripts)" "systemctl reboot" "wait_health")" ok "upgrade --reboot: reboot, then health check"
+assert_contains "$(grep describe-instance-information "$T/log")" "LastPingDateTime" "upgrade --reboot waits for a fresh SSM ping"
+assert_contains "$out" "rebooted and healthy" "upgrade --reboot: reported"
+: > "$T/log"
+out=$(EDH_YES=1 STUB_SSM_OUT=REBOOT-NEEDED EDH_REBOOT_POLL_SECONDS=0 STUB_PING="Online	2000-01-01T00:00:00.000000+00:00" \
+  run upgrade.sh os --reboot); rc=$?
+assert_status $rc 1 "upgrade --reboot: an old ping never counts as back"
+assert_contains "$out" "did not come back" "upgrade --reboot: not back: explained"
+assert_not_contains "$(scripts)" "wait_health" "upgrade --reboot: not back: no health check sent"
 : > "$T/log"
 out=$(run upgrade.sh os </dev/null); rc=$?
 assert_eq "$(grep -cE 'create-snapshot|send-command' "$T/log")" "0" "upgrade without consent changes nothing"
 
 # ============ status (read-only)
+: > "$T/log"
+out=$(FAKE_CURL_RC=7 run status.sh); rc=$?
+assert_contains "$out" "site:    https://erp.acme.com/health → unreachable" "status: an unreachable site is just 'unreachable'"
+assert_not_contains "$out" "000 in" "status: no curl noise for an unreachable site"
 : > "$T/log"
 out=$(run status.sh); rc=$?
 assert_status $rc 0 "status succeeds"

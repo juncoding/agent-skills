@@ -12,6 +12,19 @@ load_config
 require aws
 require_account
 require docker; require git; require curl
+# No container may mount the backups directory or the whole data directory: /data/backups holds the backup
+# manifest, which restores trust because the app cannot reach it.
+check_compose_mounts() {
+  local q="'" hits
+  hits=$(grep -v '^[[:space:]]*#' deploy/compose.yml | grep -nE \
+    -e "(^|[[:space:]\"$q-])/data/?[\"$q]?:" \
+    -e '\$\{EDH_DATA_DIR[^}]*\}/?["'"$q"']?:' \
+    -e '(/data|\})/backups' \
+    -e "source:[[:space:]]*[\"$q]?(/data|\\\$\\{EDH_DATA_DIR[^}]*\\})/?[\"$q]?[[:space:]]*\$" || true)
+  [[ -z "$hits" ]] || die "deploy/compose.yml mounts the data directory or /data/backups into a container — refusing: that would put the backup manifest within the app's reach. Mount only subdirectories such as \${EDH_DATA_DIR:-/data}/caddy:
+$hits"
+}
+check_compose_mounts
 ACCT=$(aws_account)
 require_instance
 REG="${ACCT}.dkr.ecr.${EDH_REGION}.amazonaws.com"
@@ -53,7 +66,7 @@ case $rc in
   0) ;;
   1) die "deploy stopped before the swap — the previous version is still serving (see the output above)" ;;
   2) die "new version failed its health check — rolled back to the previous version" ;;
-  3) die "deploy failed and the site may be down (neither the new nor the previous version passes /health) — run status.sh" ;;
+  3) die "deploy failed and no healthy version is running — the site may be down; run status.sh" ;;
   124) die "the deploy is still running on the server after the timeout — run status.sh to see how it ended" ;;
   *) die "deploy failed (exit $rc) — the site may be down; run status.sh" ;;
 esac

@@ -39,6 +39,32 @@ assert_eq "$(( $(line_of 'describe-tags --filters Name=resource-id,Values=sg-stu
 assert_contains "$log" "dlm delete-lifecycle-policy --policy-id policy-stub" "snapshot policy removed"
 assert_contains "$log" "delete-alarms" "monitoring removed"
 
+# every attached managed policy is detached before the role goes
+: > "$T/log"
+out=$(STUB_ATTACHED_POLICIES="arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore	arn:aws:iam::123456789012:policy/extra" td); rc=$?
+assert_contains "$(cat "$T/log")" "detach-role-policy --role-name edh-acme-prod-host --policy-arn arn:aws:iam::123456789012:policy/extra" \
+  "any other attached policy is detached too"
+assert_eq "$(( $(line_of 'policy/extra') < $(line_of 'iam delete-role --') ))" "1" "attached policies are detached before delete-role"
+# the role already gone (an earlier run stopped half way): the instance profile is still removed
+: > "$T/log"
+out=$(STUB_NO_ROLE=1 td); rc=$?
+assert_status $rc 0 "teardown without the role succeeds"
+assert_contains "$(cat "$T/log")" "iam delete-instance-profile --instance-profile-name edh-acme-prod-host" "instance profile removed even without the role"
+assert_contains "$(cat "$T/log")" "iam remove-role-from-instance-profile" "a role still in the profile is removed from it"
+assert_not_contains "$(cat "$T/log")" "iam delete-role --" "no delete-role for a role that is gone"
+# monitoring is removed whatever deploy.yml says now (exact names: idempotent)
+sed 's/^monitoring: .*/monitoring: none/' "$SKILL_DIR/assets/project/deploy.yml" > deploy/deploy.yml
+: > "$T/log"
+out=$(td); rc=$?
+assert_contains "$(cat "$T/log")" "delete-alarms" "monitoring: none — alarms still removed"
+assert_contains "$(cat "$T/log")" "delete-role-policy --role-name edh-acme-prod-host --policy-name edh-cwagent" "monitoring: none — agent policy still removed"
+cp "$SKILL_DIR/assets/project/deploy.yml" deploy/deploy.yml
+# a failure half way still says what was kept
+: > "$T/log"
+out=$(STUB_FAIL_VERB=delete-lifecycle-policy td); rc=$?
+assert_eq "$(( rc != 0 ))" "1" "a failing step fails teardown"
+assert_contains "$out" "Data kept" "a failing step: the kept-data message is still printed"
+
 # a protected volume that would be deleted with the server: refuse before anything changes
 : > "$T/log"
 out=$(STUB_DOT_VOLUMES=vol-protected td); rc=$?

@@ -15,6 +15,10 @@ if [[ "${STUB_READONLY:-}" == 1 ]]; then
     *) echo "STUB_READONLY refused: aws $*" >> "$STUB_LOG"; echo "stub: read-only: $svc $verb refused" >&2; exit 99 ;;
   esac
 fi
+# STUB_FAIL_VERB=<verb>: that call fails
+if [[ -n "${STUB_FAIL_VERB:-}" && "$verb" == "$STUB_FAIL_VERB" ]]; then
+  echo "An error occurred (StubFailure) when calling $svc $verb: STUB_FAIL_VERB" >&2; exit 254
+fi
 # optval <option> — the value after <option> in this call
 optval() { local j=0; while (( j < ${#clean[@]} )); do if [[ "${clean[$j]}" == "$1" ]]; then echo "${clean[$((j + 1))]}"; return; fi; j=$((j + 1)); done; }
 s3path() { if [[ "$1" == s3://* ]]; then echo "${STUB_S3:?}/${1#s3://}"; else echo "$1"; fi; }
