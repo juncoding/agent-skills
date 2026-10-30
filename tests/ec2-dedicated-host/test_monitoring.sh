@@ -42,8 +42,8 @@ for s in json.load(sys.stdin)["Statement"]:
     out.append("%s:%s:%s:%s" % (s["Effect"], ",".join(sorted(lst(s["Action"]))), ",".join(lst(s["Resource"])),
                                 json.dumps(s.get("Condition", {}), sort_keys=True)))
 print(" | ".join(sorted(out)))' 2>&1)
-assert_eq "$chk" 'Allow:cloudwatch:PutMetricData:*:{"StringEquals": {"cloudwatch:namespace": "CWAgent"}} | Allow:ec2:DescribeTags,ec2:DescribeVolumes:*:{}' \
-  "cwagent policy: PutMetricData only in namespace CWAgent, plus DescribeTags/DescribeVolumes"
+assert_eq "$chk" 'Allow:cloudwatch:PutMetricData:*:{"StringEquals": {"cloudwatch:namespace": "CWAgent/acme-prod"}} | Allow:ec2:DescribeTags,ec2:DescribeVolumes:*:{}' \
+  "cwagent policy: PutMetricData only in namespace CWAgent/acme-prod, plus DescribeTags/DescribeVolumes"
 f=$(grep 'policy-name edh-cwagent' "$T/log" | grep -o 'file://[^ ]*' | sed 's#file://##')
 [[ -n "$f" && ! -e "$f" ]] && pass "rendered cwagent policy temp file removed" || fail "cwagent policy temp file left: $f"
 # backup alarm: BackupFresh heartbeat in the client's own namespace, whatever the backup schedule
@@ -54,6 +54,12 @@ for want in "--namespace EDH/acme-prod" "--metric-name BackupFresh" "--dimension
   assert_contains "$b" "$want" "backup alarm: $want"
 done
 assert_contains "$(grep 'put-metric-alarm' "$T/log" | grep 'site-down')" "--region us-east-1" "site-down alarm lives in us-east-1"
+# agent metrics live in a per-client namespace: in a shared CWAgent namespace one client's host could publish
+# datapoints with another client's InstanceId and hide that client's disk/memory alarms
+for a in disk-root-warn disk-root-crit disk-data-warn disk-data-crit mem-high; do
+  assert_contains "$(grep 'put-metric-alarm' "$T/log" | grep "edh-acme-prod-$a ")" "--namespace CWAgent/acme-prod " "alarm $a in namespace CWAgent/acme-prod"
+done
+assert_eq "$(grep -cE 'namespace CWAgent( |$)' "$T/log")" "0" "no alarm uses the shared CWAgent namespace"
 # t-family: credit alarm; any other family: no credit alarm, and a stale one is deleted
 assert_contains "$(grep 'put-metric-alarm' "$T/log")" "edh-acme-prod-cpu-credits-low" "t4g server: CPU credit alarm"
 : > "$T/log"
@@ -65,7 +71,9 @@ assert_contains "$(grep 'delete-alarms' "$T/log")" "edh-acme-prod-cpu-credits-lo
 EDH_SKIP_SSM='' mon add >/dev/null
 s=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' "$T/log.ssm-params" | base64 --decode)
 assert_contains "$s" "amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s" "add installs and starts the CloudWatch agent"
-assert_contains "$s" '"namespace": "CWAgent"' "agent config is shipped inline"
+assert_contains "$s" '"namespace": "CWAgent/acme-prod"' "agent config is shipped inline, with the client's namespace"
+assert_not_contains "$s" "__NAME__" "agent config is rendered"
+assert_contains "$s" '${aws:InstanceId}' "agent config keeps the agent's own \${aws:InstanceId} placeholder"
 assert_not_contains "$s" "get-parameter" "agent install reads no secrets"
 
 # ============ status is read-only; add/remove refuse another account

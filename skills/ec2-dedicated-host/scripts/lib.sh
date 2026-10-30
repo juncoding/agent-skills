@@ -247,6 +247,10 @@ render_aws() {
       "$EDH_SKILL_DIR/assets/aws/$1"
 }
 
+# render_cwagent — the CloudWatch agent config for this client: it publishes into namespace CWAgent/<name>
+# (EDH_NAME is derived from the validated client and env). The agent's own ${aws:InstanceId} stays as it is.
+render_cwagent() { sed "s#__NAME__#$EDH_NAME#g" "$EDH_SKILL_DIR/assets/host/cwagent.json"; }
+
 # wait_ssm <instance-id> — until the SSM agent reports Online (max 10 min)
 wait_ssm() {
   local _

@@ -67,6 +67,16 @@ assert_contains "$out" "volume id" "render_bootstrap rejects a malformed volume 
 for u in "$SKILL_DIR"/assets/host/systemd/*; do assert_contains "$(cat "$u")" "edh-" "unit $(basename "$u") references edh"; done
 [[ -n "$(ls "$SKILL_DIR"/assets/host/systemd/ 2>/dev/null)" ]] && pass "systemd units exist" || fail "no systemd units"
 
+# --- CloudWatch agent config: rendered per client (namespace CWAgent/<name>), still valid JSON
+cwa=$(bash -c ". '$SKILL_DIR/scripts/lib.sh'; load_config '$SKILL_DIR/assets/project/deploy.yml'; render_cwagent" 2>&1)
+printf '%s' "$cwa" | python3 -m json.tool >/dev/null 2>&1 && pass "rendered cwagent.json is JSON" || fail "rendered cwagent.json invalid"
+assert_eq "$(printf '%s' "$cwa" | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["metrics"]["namespace"])' 2>&1)" \
+  "CWAgent/acme-prod" "agent publishes into namespace CWAgent/<name>"
+assert_not_contains "$cwa" "__" "no unrendered placeholders in cwagent.json"
+# nothing in the skill uses the shared, bare CWAgent namespace any more
+bare=$(grep -rnE 'CWAgent([^/]|$)' "$SKILL_DIR" | grep -v 'CWAgent/' || true)
+assert_eq "$bare" "" "no reference to the bare CWAgent namespace"
+
 # --- AWS templates
 export STUB_LOG="$T/aws.log"
 render() { bash -c ". '$SKILL_DIR/scripts/lib.sh'; load_config '$SKILL_DIR/assets/project/deploy.yml'; EDH_ACCOUNT=123456789012; render_aws $1" 2>&1; }

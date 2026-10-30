@@ -41,9 +41,10 @@ health_check_id() {
   aws route53 list-health-checks --query "HealthChecks[?CallerReference=='$REF'].Id | [0]" --output text
 }
 
-# The agent may publish only into namespace CWAgent (inline policy edh-cwagent). The managed
-# CloudWatchAgentServerPolicy is never used: it allows PutMetricData into any namespace, so a host could
-# publish another client's EDH/<name> BackupFresh heartbeat and hide that client's stale backups.
+# The agent may publish only into this client's namespace CWAgent/<name> (inline policy edh-cwagent). Never the
+# managed CloudWatchAgentServerPolicy, which allows PutMetricData into any namespace: a host could publish
+# another client's EDH/<name> BackupFresh heartbeat and hide that client's stale backups. Nor one shared agent
+# namespace: a host could publish datapoints with another client's InstanceId and hide its disk/memory alarms.
 agent_policy() {
   render_aws cwagent-policy.json > "$WORK/cwagent-policy.json"
   aws iam put-role-policy --role-name "$ROLE" --policy-name edh-cwagent --policy-document "file://$WORK/cwagent-policy.json"
@@ -58,7 +59,7 @@ if ! command -v /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
   dpkg -i -E cwa.deb && rm -f cwa.deb
 fi
 cat > /opt/aws/amazon-cloudwatch-agent/etc/edh.json <<'CWAEOF'
-$(cat "$EDH_SKILL_DIR/assets/host/cwagent.json")
+$(render_cwagent)
 CWAEOF
 /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/edh.json" >/dev/null \
     || die "could not install or start the CloudWatch agent on $EDH_IID"
@@ -76,10 +77,10 @@ add() {
   type=$(awsr ec2 describe-instances --instance-ids "$EDH_IID" --query 'Reservations[0].Instances[0].InstanceType' --output text)
   for p in root:/ data:/data; do
     disk_dims="Name=InstanceId,Value=$EDH_IID Name=path,Value=${p#*:} Name=fstype,Value=ext4"
-    alarm "$r" "disk-${p%%:*}-warn" "Disk ${p#*:} over 80%" CWAgent disk_used_percent "$disk_dims" Maximum 300 1 80 GreaterThanThreshold missing
-    alarm "$r" "disk-${p%%:*}-crit" "Disk ${p#*:} over 90%" CWAgent disk_used_percent "$disk_dims" Maximum 300 1 90 GreaterThanThreshold missing
+    alarm "$r" "disk-${p%%:*}-warn" "Disk ${p#*:} over 80%" "CWAgent/$EDH_NAME" disk_used_percent "$disk_dims" Maximum 300 1 80 GreaterThanThreshold missing
+    alarm "$r" "disk-${p%%:*}-crit" "Disk ${p#*:} over 90%" "CWAgent/$EDH_NAME" disk_used_percent "$disk_dims" Maximum 300 1 90 GreaterThanThreshold missing
   done
-  alarm "$r" mem-high "Memory over 90% for 10 min" CWAgent mem_used_percent "Name=InstanceId,Value=$EDH_IID" Average 300 2 90 GreaterThanThreshold missing
+  alarm "$r" mem-high "Memory over 90% for 10 min" "CWAgent/$EDH_NAME" mem_used_percent "Name=InstanceId,Value=$EDH_IID" Average 300 2 90 GreaterThanThreshold missing
   alarm "$r" cpu-high "CPU over 80% for 15 min" AWS/EC2 CPUUtilization "Name=InstanceId,Value=$EDH_IID" Average 300 3 80 GreaterThanThreshold missing
   if [[ "$type" == t* ]]; then
     alarm "$r" cpu-credits-low "Burst credits nearly used up — consider a larger or m-family server" AWS/EC2 CPUCreditBalance "Name=InstanceId,Value=$EDH_IID" Minimum 300 1 50 LessThanThreshold missing
