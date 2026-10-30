@@ -6,7 +6,7 @@
       "id": 0,
       "name": "first-deploy-asks-and-sizes",
       "prompt": "Deploy this. It's a Next.js 15 app (app router) with Prisma on Postgres, and it generates invoice PDFs by posting HTML to a Gotenberg service. There's a Dockerfile, a /health route that runs `prisma.$queryRaw`select 1``, and Prisma migrations. There is no deploy/ folder yet. The client is a new one. (You can't reach AWS from here — say exactly which commands you'd run and what you'd ask or show me at each step.)",
-      "expected_output": "Recognises a first deploy with this skill. Asks ONCE, in one message, for the missing parameters: client name, domain, alert email(s) (and the AWS account id to pin). Then runs init.sh with --gotenberg and --migrate \"npx prisma migrate deploy\" (plus --account-id). Explains the sizing: 768 MB base + 768 MB app + 900 MB Gotenberg = 2436 MB, so t4g.medium. Runs provision.sh as a plan, shows the plan and monthly cost, and waits for approval before EDH_YES=1 provision.sh --apply. Then secrets via secrets.sh set from stdin (GOTENBERG_URL, AWS_REGION and EDH_UPLOADS_BUCKET are provided by default), the DNS A record to the Elastic IP, deploy.sh and status.sh.",
+      "expected_output": "Recognises a first deploy with this skill. Asks ONCE, in one message, for the missing parameters: client name, domain, alert email(s) (and the AWS account id to pin). Then runs init.sh with --gotenberg and --migrate \"npx prisma migrate deploy\" (plus --account-id). Explains the sizing: 768 MB base + 768 MB app + 900 MB Gotenberg = 2436 MB, so t4g.medium. Runs provision.sh as a plan, shows the plan and monthly cost, and waits for approval before EDH_YES=1 provision.sh --apply. Then secrets: the user runs secrets.sh set NAME themselves via the ! prefix so values never enter the chat (GOTENBERG_URL, AWS_REGION and EDH_UPLOADS_BUCKET are provided by default), the DNS A record to the Elastic IP, deploy.sh and status.sh.",
       "files": [],
       "assertions": [
         "Asks for client name, domain and alert email(s) in a single message rather than one at a time",
@@ -15,7 +15,7 @@
         "Recommends t4g.medium, with the memory arithmetic (768 + app memory + 900 for Gotenberg, <= 60% of RAM)",
         "Runs provision.sh WITHOUT --apply first, shows the plan and an approximate monthly cost, and waits for approval before --apply",
         "Only sets EDH_YES=1 after the user has approved",
-        "Sets app secrets with secrets.sh set NAME reading the value from stdin, never on the command line or echoed back",
+        "Has the user set app secrets themselves (e.g. ! pbpaste | bash <skill>/scripts/secrets.sh set NAME, or in their own terminal) so values never enter the chat; never puts a value on a command line or echoes it back",
         "Tells the user to create the DNS A record pointing the domain at the Elastic IP before/for the first deploy",
         "Runs deploy.sh and then status.sh"
       ]
@@ -89,6 +89,19 @@
         "Tells the user to git pull (and then deploy again)",
         "Does NOT run deploy.sh --allow-non-main unless the user explicitly asks for it",
         "Does NOT set EDH_YES=1 to get past the refusal"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "negative-trigger-shared-box",
+      "prompt": "deploy this to my shared box at 203.0.113.10 — it already runs two other apps of mine.",
+      "expected_output": "This is the ec2-docker-host case (an existing shared server named by IP, several apps on it), not ec2-dedicated-host. The agent uses ec2-docker-host's discover-first, neighbor-safe workflow and does NOT run init.sh, provision.sh or any other ec2-dedicated-host script, and does not create a new EC2 server.",
+      "files": [],
+      "assertions": [
+        "Treats this as the ec2-docker-host workflow (existing shared server, other apps on it)",
+        "Does NOT run ec2-dedicated-host scripts (init.sh, provision.sh, deploy.sh of this skill)",
+        "Does NOT propose creating a new dedicated EC2 server",
+        "Starts with read-only discovery of the existing host before changing anything"
       ]
     }
   ]

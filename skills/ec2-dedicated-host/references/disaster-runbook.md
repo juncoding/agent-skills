@@ -24,7 +24,9 @@ Manager shell (`aws ssm start-session --target <instance-id>`; no SSH). Never pr
   - SSM online but the site down: Docker refuses to start without `/data`
     (`mountpoint /data`, `sudo journalctl -b -u docker`); see "Data volume lost" if it is missing.
   - root disk or OS beyond repair: rebuild from the data volume — `EDH_CONFIRM_NAME=<client>-<env>
-    teardown.sh` (keeps the volume), `provision.sh` → `--apply`, `deploy.sh`.
+    teardown.sh --keep-ip` (keeps the volume and the Elastic IP), `provision.sh` → `--apply`, `deploy.sh`.
+    Without `--keep-ip` the Elastic IP is released and the rebuilt server gets a **new public IP**: the
+    DNS A record must be updated (`provision.sh --apply` prints the new IP; `status.sh` shows it).
 
 ## Disk full
 

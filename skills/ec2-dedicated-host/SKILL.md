@@ -2,14 +2,15 @@
 name: ec2-dedicated-host
 description: >-
   Run one client's web app on its own dedicated AWS EC2 server with Docker — create the server, deploy,
-  maintenance page, backups and restore, monitoring, resizing and OS upgrades. Use when the user says
-  "deploy", "deploy to prod", "ship it", "push this live" or "put this on its own server" in a project that
-  has (or should get) a deploy/deploy.yml; or wants to put the site into maintenance, take, list or restore
-  a backup, roll back, check server status, set app secrets, resize the server or disk, add or remove
-  monitoring/alerts, upgrade the OS, or tear the server down. One server per client: Caddy (auto-HTTPS) +
-  app + Postgres (+ optional Gotenberg) in one Compose project, data on its own EBS volume, no SSH (SSM
-  only). NOT for many apps sharing one server (use ec2-docker-host), ECS/EKS/Fargate, Vercel, Kubernetes
-  or local development.
+  maintenance page, backups and restore, monitoring, resizing and OS upgrades. Use in a project whose
+  deploy/deploy.yml was made by this skill's init.sh (it has client: and domain: keys) when the user says
+  "deploy", "deploy to prod", "ship it" or "push this live", or wants maintenance mode, a backup or
+  restore, a rollback, server status, app secrets, a resize, monitoring/alerts, an OS upgrade or a teardown;
+  or when the user wants a client or app on its own NEW EC2 server. One server per client: Caddy
+  (auto-HTTPS) + app + Postgres (+ optional Gotenberg) in one Compose project, data on its own EBS volume,
+  no SSH (SSM only). If the user names an existing shared server (IP, SSH target or instance ID), use
+  ec2-docker-host instead. NOT for many apps sharing one server (ec2-docker-host), ECS/EKS/Fargate,
+  Vercel, Kubernetes or local development.
 ---
 
 # EC2 dedicated host — one client, one server
@@ -50,18 +51,18 @@ Run from the **project root** (the directory holding `deploy/`): `bash <this-ski
 |---|---|---|
 | "set this up" (first time) | `init.sh --client acme --domain app.example.com --emails ops@example.com --account-id 123456789012` | also `--env`, `--region`, `--gotenberg`, `--app-memory MB`, `--app-port N`, `--migrate "CMD"`, `--monitoring none`, `--no-instance-role`. Never overwrites `deploy/`. |
 | "create the server" | `provision.sh` (plan) → `provision.sh --apply` | plan is read-only; `--apply` only after the user approved the plan + cost |
-| "deploy" / "deploy to prod" | `deploy.sh` | `--maint` (maintenance page during migrations), `--allow-dirty`, `--allow-non-main` (prod emergency only) |
+| "deploy" / "deploy to prod" | `deploy.sh` | `--maint` (maintenance page during migrations), `--allow-dirty` (in prod only with `--allow-non-main`), `--allow-non-main` (prod emergency only) |
 | "roll back" | `rollback.sh` | previous image + its env; database untouched; run again to roll forward. Asks first. |
 | "maintenance on/off" | `maint.sh on --message "…" --until "23:00"` / `off` / `status` | `--no-link` hides the bypass link; `rotate-bypass` makes a new token (applied by the next deploy) |
 | "back up now" / "list backups" | `backup.sh now` / `backup.sh list [N]` | `now` writes to `db/daily/` |
 | "restore" | `restore.sh db --latest\|--date YYYY-MM-DD\|--key db/… [--check]` | `--check` = side database, live data untouched. Without it: replaces live DB (asks first). `--unverified` only with `--key`. |
 | "restore the disk" | `restore.sh disk --snapshot snap-…` | app offline minutes; `--foreign-snapshot` for an untagged snapshot. Asks first. |
 | "status" | `status.sh` | read-only: server, DNS, site, firing alarms, containers, backups, disk, memory |
-| "set a secret" | `printf '%s' "$VALUE" \| secrets.sh set NAME` · `secrets.sh list` · `secrets.sh delete NAME` | value via stdin only; redeploy to apply |
+| "set a secret" | the user runs `! pbpaste \| bash <this-skill>/scripts/secrets.sh set NAME` · `secrets.sh list` · `secrets.sh delete NAME` | value via the prompt/stdin only, never in chat or argv; redeploy to apply |
 | "monitoring" | `monitoring.sh add` / `remove` / `status` | email alerts via SNS; `remove` asks first |
 | "resize" | `resize.sh instance t4g.large` / `resize.sh disk 40` | instance: 3–5 min offline; disk: online, grow only. Ask first. |
 | "upgrade the OS" | `upgrade.sh os [--reboot]` | snapshot first; reboots only with `--reboot`. Ask first. |
-| "tear down" | `EDH_CONFIRM_NAME=acme-prod teardown.sh` | removes server + plumbing; keeps volume, buckets, ECR, secrets, snapshots |
+| "tear down" | `EDH_CONFIRM_NAME=acme-prod teardown.sh [--keep-ip]` | removes server + plumbing; keeps volume, buckets, ECR, secrets, snapshots. Releases the Elastic IP (a rebuild gets a new IP → update DNS) unless `--keep-ip` |
 
 `EDH_YES=1` answers the scripts' `[y/N]` prompts. Set it **only after the user agreed in chat** to that exact
 action. `teardown.sh` ignores it and needs `EDH_CONFIRM_NAME=<client>-<env>` (or typing the name).
@@ -76,13 +77,19 @@ action. `teardown.sh` ignores it and needs `EDH_CONFIRM_NAME=<client>-<env>` (or
 3. **`init.sh`** with those values (+ `--gotenberg`, `--app-memory`, `--migrate` as the project needs). It
    validates everything and writes `deploy/deploy.yml`, `compose.yml`, `Caddyfile`, `maint/*.html`.
 4. **Check the app contract** and fix gaps now: arm64-buildable Dockerfile, listens on `$PORT`, DB-aware
-   `GET /health`, backward-compatible migrations. Commit `deploy/` and the fixes, push to `main`.
+   `GET /health`, backward-compatible migrations. Commit `deploy/` and the fixes; ask the user to push or
+   merge them into `main` through their own review process (or push only if they ask you to).
 5. **`provision.sh`** (plan only — it changes nothing). Show the user the plan and the monthly cost
    (`references/provisioning.md`, `references/sizing.md`). **On approval only:** `EDH_YES=1 provision.sh --apply`.
-   Expect two AWS confirmation emails per alert address (two SNS topics) — tell the user to click both.
-6. **Secrets:** ask the user for each app secret; set it with `secrets.sh set NAME` reading from stdin
-   (`printf '%s' "$V" | …` or let the user type it at the prompt). Never echo values back or put them in a
-   command line, a file in the repo, or chat output.
+   Each alert address gets an AWS confirmation email per SNS topic — two when the region isn't us-east-1
+   (one there for the site-down alarm) — tell the user to click every one.
+6. **Secrets:** the user sets each one **themselves**, so values never enter the chat. In Claude Code they
+   run it with the `!` prefix; as a `!` command may get no interactive prompt, piping from the clipboard is
+   safest: copy the value, then `! pbpaste | bash <this-skill>/scripts/secrets.sh set NAME`. (In their own
+   terminal, `bash <this-skill>/scripts/secrets.sh set NAME` prompts without echoing.) Only if the user has
+   already pasted a value into the chat, pipe it with the shell builtin —
+   `printf '%s' '<value>' | bash <this-skill>/scripts/secrets.sh set NAME` — never repeat it back, and never
+   pass it as an argument to any other command.
 7. **DNS:** tell the user to create an A record `app.example.com → <Elastic IP>` (printed by provision).
    Wait until `dig +short app.example.com` returns it — HTTPS certificates need it.
 8. **`deploy.sh`**, then **`status.sh`**. Give the user the URL, and mention the maintenance bypass link
@@ -92,29 +99,31 @@ action. `teardown.sh` ignores it and needs `EDH_CONFIRM_NAME=<client>-<env>` (or
 
 Run `deploy.sh` without asking: it builds the current commit, ships, migrates, health-checks and rolls
 back on its own. Before anything is built, for `env: prod` it runs `git fetch origin main` and **refuses
-unless the current branch is `main` and HEAD is exactly `origin/main`** (tree clean too):
+unless the current branch is `main`, HEAD is exactly `origin/main` and the working tree is clean**
+(`prod_branch:` in deploy.yml names another branch than `main`):
 
 | Refusal says | Tell the user / do |
 |---|---|
 | `… N commit(s) behind origin/main` | "Your local main is behind GitHub" → `git pull`, then deploy again |
-| `… commit(s) that are not on origin/main (unpushed)` | push (through their review process), then deploy |
-| `on branch 'x', not main` / `detached HEAD` | `git checkout main && git pull`; get the work merged first |
-| `… have diverged` | reconcile (`git pull --rebase`, push) — ask the user |
+| `… commit(s) that are not on origin/main (unpushed)` | ask the user to push/merge through their review, then deploy |
+| `on branch 'x', not main` / `detached HEAD` | `git checkout main && git pull`; the work must be merged first (the user's review) |
+| `… have diverged` | ask the user how to reconcile; don't push for them |
 | `could not fetch main from origin` | network/remote problem; fix it, don't bypass it |
-| `uncommitted changes` | commit (and push) first; `--allow-dirty` only if the user explicitly wants it |
+| `uncommitted changes` / `the working tree has uncommitted changes` | commit, and get it into main. In prod `--allow-dirty` works only together with `--allow-non-main` (emergency) |
 
 **`--allow-non-main` is for emergencies only** (a hotfix branch while main is broken), and only when the
-user asks for it. It prints a red EMERGENCY warning naming the branch, commit and subject and asks for
-confirmation (`EDH_YES=1` only after the user said yes). Remind them to merge the fix into main — the next
-normal deploy replaces it. Non-prod envs (`env: staging` …) skip the origin/main check.
+user asks for it (with uncommitted changes, also `--allow-dirty`). It prints a red EMERGENCY warning naming
+the branch, commit and subject and asks for confirmation (`EDH_YES=1` only after the user said yes). Remind
+them to get the fix into main through their review — the next normal deploy replaces it. Non-prod envs (`env: staging` …) skip the origin/main check.
 
 Every deploy prints the commit being deployed (`deploying <sha> "<subject>"`). Use `--maint` when a
 migration is risky or slow: users see the maintenance page while it runs.
 
 ## Exit codes and what to tell the user
 
-Every local script exits **0** on success and **1** on any failure, with an `ERROR:` line that says what
-happened. Read it; don't retry blindly.
+Every local script exits **0** on success and non-zero on failure: **1** with an `ERROR:` line for every
+handled case, or the AWS CLI's own code (with its error text) for an unexpected AWS error. Read the
+message; don't retry blindly.
 
 | Script / message | Meaning → what to say |
 |---|---|
@@ -148,7 +157,8 @@ healthy version; `deploy.sh` turns those into the messages above.
 - **Pin `account_id`** in `deploy/deploy.yml` (`init.sh --account-id …`). Without it the scripts only
   warn; with it every mutating script refuses any other AWS account before touching anything.
 - Local scripts must stay **bash 3.2** compatible (macOS): no `mapfile`, associative arrays, `${x,,}`.
-  If you change a script, run `bash tests/ec2-dedicated-host/run.sh --fast`.
+  (Contributor note: the tests live only in the skill's source repository, not in an installed skill —
+  there, run `bash tests/ec2-dedicated-host/run.sh --fast` after changing a script.)
 - If something fails, run `status.sh` and read `references/disaster-runbook.md` before anything
   destructive. Prefer `restore.sh db … --check` before a real restore.
 

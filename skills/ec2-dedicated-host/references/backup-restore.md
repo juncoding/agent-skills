@@ -129,7 +129,9 @@ client's data.
 
 1. **Server gone, data volume intact** (most cases): `provision.sh` — the plan shows the volume `exists` and
    the server `would create` — then `--apply`. The new server goes to the volume's AZ and mounts it without
-   formatting. `deploy.sh`, `status.sh`. Database, manifest and certificates are all there.
+   formatting. `deploy.sh`, `status.sh`. Database, manifest and certificates are all there. The tagged
+   Elastic IP is reused if it still exists (e.g. after `teardown.sh --keep-ip`); otherwise the new server gets
+   a new public IP — update the DNS A record (provision prints the IP).
 2. **Data volume gone too**: find the newest snapshot
    (`aws ec2 describe-snapshots --owner-ids self --filters Name=tag:edh:client,Values=acme Name=tag:edh:env,Values=prod`).
    `provision.sh --apply` (creates an empty volume), `deploy.sh`, then `restore.sh disk --snapshot snap-…`.

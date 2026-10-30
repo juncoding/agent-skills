@@ -45,7 +45,8 @@ GitHub OIDC) is documented as an opt-in upgrade.
 
 One client, one server, everything driven from the project's `deploy/deploy.yml`:
 
-- **Provision** with a read-only plan first (cost included), then `--apply`: IAM role scoped to that client,
+- **Provision** with a read-only plan first (the agent states the monthly cost from the skill's
+  provisioning reference), then `--apply`: IAM role scoped to that client,
   security group without SSH, backup + uploads buckets, ECR repo, an encrypted data volume, Elastic IP,
   snapshot policy. Idempotent and re-runnable; nothing tagged `Protect=true` is ever deleted.
 - **Deploy** builds the current commit for arm64, ships it over SSM, takes a safety dump, runs migrations,
@@ -129,10 +130,11 @@ images before swapping, scope `--remove-orphans` per app), but they act on **rea
 - **Test against a throwaway host** before pointing them at production.
 - The skill always discovers live host state before changing anything, and re-verifies neighbors after —
   trust that flow, and stop if discovery shows something unexpected.
+
 `ec2-dedicated-host` bundles scripts that **create, change and remove AWS resources** with the AWS CLI
 (EC2, IAM, S3, SSM, ECR, DLM, CloudWatch, SNS, Route 53) and run commands as root on the server through SSM.
-Every mutating script checks the AWS account against the pinned `account_id`, plans before it provisions,
-asks before anything that stops the site or touches data, and never deletes resources tagged `Protect=true`.
+Every mutating script checks the AWS account against the pinned `account_id`; provisioning shows a plan
+first; scripts ask before anything that stops the site or touches data, and never deletes resources tagged `Protect=true`.
 It costs money (roughly $20–75 per client per month, depending on the server size and monitoring).
 
 - Provided **as is, without warranty** (see [LICENSE](LICENSE)). You are responsible for what runs against

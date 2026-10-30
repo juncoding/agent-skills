@@ -250,15 +250,22 @@ Building and reviewing the skill hardened it well beyond the design. The importa
   `compose.yml`, Caddyfile, and the Caddy/Postgres containers — is restored on any abort before the switch,
   failed migrations included; rollback restores the env the old image ran with. The app gets `AWS_REGION`,
   `EDH_UPLOADS_BUCKET` and (with Gotenberg) `GOTENBERG_URL` unless it sets them itself. `deploy.sh` refuses compose files that expose `/data`, `/data/backups`, `/`, the Docker socket,
-  `..` paths, privileged mode or host namespaces. **Prod deploys must be exactly `origin/main`**
-  (`--allow-non-main` for emergencies, with a warning and confirmation).
+  `..` paths, privileged mode, capabilities, devices or host namespaces (bind mounts are an allowlist).
+  **Prod deploys must be exactly `origin/<prod_branch>`** (default `main`) with a clean tree
+  (`--allow-non-main` for emergencies, with a warning and confirmation). An aborted deploy also restores
+  `/etc/edh/edh.env`; a failed first deploy reports that nothing was serving.
 - **Maintenance.** Exact bypass-cookie match, `/health` always reaches the app, `rotate-bypass`, the link goes
   to the terminal rather than logs; `deploy --maint` for risky migrations.
 - **Monitoring.** Email subscriptions follow `alert_emails` (removed confirmed addresses are unsubscribed,
   pending ones reported). Route 53 health checks are tracked by tags (including `ManagedBy`), replaced safely
   on a domain change; the CPU-credit alarm exists only on t-family servers. No EC2 auto-recovery action is
   configured by the skill. Known limitation: the CloudWatch agent package's signature is not verified.
-- **Secrets** are read from stdin and passed to AWS through 0600 temp files, never on a command line.
+- **Secrets** are read from stdin and passed to AWS through 0600 temp files, never on a command line; the
+  user enters them with `!`-prefixed commands so values never enter the chat.
+- **Teardown** releases the Elastic IP (a rebuilt server gets a new IP; DNS must be updated) unless
+  `--keep-ip`.
+- **IAM trims.** The host can read backups only by key/version (no `s3:ListBucket`); the agent policy has
+  only `ec2:DescribeTags` besides its namespace.
 - **Upgrades / resize.** `upgrade os` snapshots first and detects the reboot from SSM ping times; `resize`
   checks arm64 support and AZ availability before stopping and returns to the old type if the new one won't
   start.

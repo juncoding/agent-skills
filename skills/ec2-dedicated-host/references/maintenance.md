@@ -42,7 +42,8 @@ the maintenance page — for checking the work before switching maintenance off.
 
 ## Customizing the pages
 
-Edit `deploy/maint/maintenance.html` and `deploy/maint/down.html` in the project, commit, push, deploy.
+Edit `deploy/maint/maintenance.html` and `deploy/maint/down.html` in the project, commit, get it into main
+(the user's review), deploy.
 
 - Keep the placeholders `{{MESSAGE}}` and `{{UNTIL}}` in `maintenance.html`; they are replaced literally.
 - Keep `id="edh-maintenance"` and `id="edh-down"` on the main element (tests and checks look for them).

@@ -43,21 +43,23 @@ with `monitoring: none`, `status.sh` shows `last upload: … ← STALE`.
 ## Alert emails: two SNS topics
 
 Topic `edh-acme-prod-alerts` exists in the app region (alarms, and alerts the server sends itself) **and in
-us-east-1** (the site-down alarm: Route 53 health-check metrics live there). So **each address receives two
-"AWS Notification - Subscription Confirmation" emails** and must click both links; until then it gets
-nothing from that topic.
+us-east-1** (the site-down alarm: Route 53 health-check metrics live there). So when the app region is not
+us-east-1, **each address receives two "AWS Notification - Subscription Confirmation" emails** and must
+click both links (in us-east-1 itself there is one topic and one email); until then it gets nothing from
+that topic.
 
 - `add` reports every unconfirmed address ("has not confirmed … check that inbox (and spam)") and doesn't
   subscribe it again. AWS deletes unconfirmed subscriptions after a few days; then `add` subscribes the address again.
 - `add` keeps the subscriptions in step with `alert_emails`, in both regions: new addresses are subscribed,
-  and a **confirmed** address no longer listed is unsubscribed (reported). A **pending** one can't be removed
-  through the API: `add` reports it as pending; it expires unconfirmed. Addresses compare case-insensitively;
-  non-email subscriptions added by hand are left alone.
+  and **any** confirmed email subscription whose address is not in `alert_emails` is unsubscribed and
+  reported — including one added by hand in the console. A **pending** one can't be removed through the API:
+  `add` reports it as pending; it expires unconfirmed. Addresses compare case-insensitively; non-email
+  subscriptions (e.g. an HTTPS endpoint added by hand) are left alone.
 
 Messages the server sends itself (app-region topic; with `monitoring: none` they are only logged): backup
 failed, deploy rolled back / failed / aborted, SITE DOWN after deploy or rollback, rollback failed, restore
-failed / app unhealthy, restore refused (backup not in manifest), unverified backup restored, restore drill
-FAILED.
+failed / app unhealthy, restore refused (backup not in manifest — sent by `restore.sh db … --check`; a real
+restore of such a key sends "restore failed" instead), unverified backup restored, restore drill FAILED.
 
 ## Maintenance pauses the site alarm
 
@@ -70,7 +72,7 @@ server itself (`deploy.sh --maint`, a database restore) does not pause it; `/hea
 `add` installs the agent over SSM if missing (the `.deb` from `amazoncloudwatch-agent.s3.amazonaws.com`) and
 configures it from `assets/host/cwagent.json`: memory and disk (`/`, `/data`) every 60 s, into namespace
 `CWAgent/<client>-<env>`. Its permissions are the inline policy `edh-cwagent`: `PutMetricData` only into that
-namespace, plus `DescribeTags`/`DescribeVolumes` — never the managed `CloudWatchAgentServerPolicy`, which
+namespace, plus `ec2:DescribeTags` — never the managed `CloudWatchAgentServerPolicy`, which
 would let one client's server publish into another client's namespaces and hide its alarms.
 
 **Known limitation:** the agent `.deb` is downloaded over HTTPS but its signature is **not verified**
@@ -81,6 +83,6 @@ before `dpkg -i`.
 `remove` (asks first) deletes the 10 alarms by name in both regions, both topics (and their subscriptions),
 this client's Route 53 health checks (tagged `edh:client`/`edh:env` **and** `ManagedBy=ec2-dedicated-host`),
 stops the agent and deletes the `edh-cwagent` policy. Then set `monitoring: none` in `deploy.yml`, commit,
-push and redeploy, so the server stops publishing to the deleted topic. Data is never touched.
+get it into main and redeploy, so the server stops publishing to the deleted topic. Data is never touched.
 
 Changing the domain: re-run `add` — it creates the new health check first, then deletes the old one.

@@ -103,14 +103,28 @@ them, drop old ones in a later release. For a risky or slow migration, `deploy.s
 
 The scaffolded `compose.yml` is the template to keep. You may add services, environment and settings, but:
 
-- **No container may mount the data directory itself or `/data/backups`** (`/data`, `${EDH_DATA_DIR:-/data}`,
-  any `…/backups`, long-syntax `source:` included). `/data/backups` holds the backup manifest that restores
-  trust because the app can't reach it. Subdirectories such as `${EDH_DATA_DIR:-/data}/uploads` are fine.
-- **No access to the server itself**: no `/` bind mount, no Docker socket (`docker.sock`), no paths with
-  `..`, no `privileged: true`, no `pid: host`, no `network_mode: host`.
+- **Bind mounts only from an allowlist**: `./<dir>` (next to compose.yml on the server, i.e. `/opt/edh/app`),
+  `/data/<dir>` or `${EDH_DATA_DIR:-/data}/<dir>`. Named volumes are fine. Never the data directory itself
+  or `/data/backups` — it holds the backup manifest, which restores trust because the app can't reach it —
+  and never a path with `..`. Short syntax, long syntax (`source:`) and flow lists (`volumes: [...]`) are all
+  checked.
+- **No access to the server itself**: no Docker socket (`docker.sock`), no `privileged: true`, no `cap_add`,
+  no `devices`, no `pid`/`ipc`/`userns_mode`/`network_mode: host`.
 - Keep the service names `caddy`, `app`, `postgres` (the host scripts use them), `name: ${EDH_NAME:?}`,
   and `env_file` with `format: raw` (needs Compose ≥ 2.30, installed by bootstrap).
 
 The check is a lint of the file as written (comment lines ignored; values hidden in variables are not
-resolved). On the server, `docker compose config` and `caddy validate` must also pass before anything is
-installed.
+resolved); a refusal names the file's line numbers. On the server, `docker compose config` and
+`caddy validate` (with the caddy image `compose.yml` uses) must also pass before anything is installed.
+
+**Only `deploy/compose.yml`, `deploy/Caddyfile` and `deploy/maint/*.html` are shipped to the server.** Any
+other file `compose.yml` refers to (a config file, an extra `env_file`, a `build:` context) does not reach it:
+bake such files into an image, or pass the settings as environment through `secrets.sh`.
+
+## Test-only switches
+
+The scripts read a few environment switches meant **only for the test suite** — `EDH_SKIP_SSM`,
+`EDH_SKIP_PULL`, `EDH_SKIP_PRUNE`, `EDH_NO_SYSTEMD`, `EDH_SSM_POLL_SECONDS`, `EDH_REBOOT_POLL_SECONDS`,
+`EDH_IAM_WAIT`, `EDH_HEALTH_TRIES`, `EDH_HTTP_PORT`, `EDH_HTTPS_PORT`, and the path overrides `EDH_ENV_FILE`,
+`EDH_APP_DIR`, `EDH_DATA_DIR`, `EDH_BIN_DIR`, `EDH_LOCK_FILE`, `EDH_MANIFEST`. Don't set them in real use. The
+only switches for real use are `EDH_YES=1` and `EDH_CONFIRM_NAME` (after the user agreed).

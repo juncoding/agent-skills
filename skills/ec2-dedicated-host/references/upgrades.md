@@ -15,12 +15,15 @@
 - Docker and the AWS CLI are OS packages (apt / snap) and are upgraded the same way.
 - A new Ubuntu release is not an in-place upgrade: servers are built from the Ubuntu 24.04 arm64 image
   (`provision.sh`). Moving to a newer release means changing that image and rebuilding the server from the
-  kept data volume (teardown + provision), which is outside this skill's commands.
+  kept data volume (`teardown.sh --keep-ip` + `provision.sh --apply`), which is outside this skill's commands.
+  Without `--keep-ip` the rebuilt server gets a new public IP and the DNS A record must be updated
+  (`provision.sh --apply` prints it; `status.sh` shows it).
 
 ## Service images (Postgres, Caddy, Gotenberg)
 
 The tags are pinned in `deploy/compose.yml`: `postgres:18-alpine`, `caddy:2.10-alpine`,
-`gotenberg/gotenberg:8`. An upgrade is: **edit the tag, commit, push to main, `deploy.sh`.**
+`gotenberg/gotenberg:8`. An upgrade is: **edit the tag, commit, get it into main (ask the user to push or merge it
+through their review), `deploy.sh`.**
 
 - Compose downloads an image only when that tag isn't on the server yet. A floating tag (`18-alpine`) is
   therefore **not** refreshed by later deploys — changing the tag is what upgrades. Use a more specific tag
@@ -48,7 +51,8 @@ upgrade is a dump and restore under maintenance; the old cluster stays untouched
 2. `maint.sh on --message "We're upgrading the database." --until "…"`.
 3. Stop writes (Session Manager): `cd /opt/edh/app && sudo docker compose stop app`.
 4. `backup.sh now` — note the key it reports (`db/daily/app-<UTC>.dump`; also in `backup.sh list`).
-5. Change `postgres:18-alpine` → `postgres:19-alpine` in `deploy/compose.yml`; commit; push to main.
+5. Change `postgres:18-alpine` → `postgres:19-alpine` in `deploy/compose.yml`; commit; ask the user to push or
+   merge it into main through their review (prod deploys only exactly `origin/main`).
 6. `deploy.sh`. Postgres 19 initialises an empty database; migrations create the schema; the maintenance
    page stays on (deploy only switches off maintenance it switched on itself).
 7. `restore.sh db --key <key> --check` — the dump restores into Postgres 19; look at it with the user.
@@ -56,5 +60,5 @@ upgrade is a dump and restore under maintenance; the old cluster stays untouched
    `/health`, and **switches maintenance off** — the site is live on 19.
 9. Verify with the user. After a few days, delete the old cluster: `sudo rm -rf /data/postgres/18` (ask).
 
-**Way back** (before users write to 19): tag back to `18-alpine`, commit, push, `deploy.sh` — the old
+**Way back** (before users write to 19): tag back to `18-alpine`, commit, have it pushed/merged, `deploy.sh` — the old
 cluster (as of step 3) serves again; `maint.sh off`. After users wrote to 19, going back loses those writes.

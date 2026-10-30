@@ -75,7 +75,7 @@ backup-restore.md). Changing the value and re-running `provision.sh --apply` upd
 - **SSM**: read only `/<client>/<env>` and below; an explicit **Deny** on reading any other parameter
   (except AWS public `/aws/service/*`), so the managed SSM policy can't widen it. Decrypt only via SSM.
 - **Backups**: `s3:PutObject` only under `db/*`, only with `If-None-Match: *` (create-only, **write-once**)
-  and only in this account (`s3:ResourceAccount`); read access to the backup bucket; **no delete**.
+  and only in this account (`s3:ResourceAccount`); read (by version) of the backup bucket's objects, no listing; **no delete**.
 - **Uploads**: get/put/delete/list on the uploads bucket only.
 - **ECR**: pull from `edh/<client>` only.
 - **CloudWatch**: `PutMetricData` only into namespace `EDH/<client>-<env>` (the backup heartbeat); the agent
@@ -106,4 +106,6 @@ and Caddy can only obtain the HTTPS certificate once it does.
 
 `teardown.sh` removes the server, Elastic IP, security group, DLM policy, IAM role/profile and monitoring.
 It **keeps** the data volume, both buckets, the ECR repo, SSM parameters and existing snapshots (which no
-longer expire once the policy is gone). Re-running `provision.sh --apply` reuses all of it.
+longer expire once the policy is gone). Re-running `provision.sh --apply` reuses all of it. A rebuilt server
+gets a **new public IP** (update the DNS A record) — unless `teardown.sh --keep-ip` kept the Elastic IP
+(~$3.60/month while unattached), which provision then reuses.

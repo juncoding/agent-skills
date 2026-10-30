@@ -1537,17 +1537,17 @@ render_aws() {
 . "$(dirname "$0")/assert.sh"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 cd "$T"
-bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.acme.com --emails "a@x.com,b@x.com" \
+bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.example.com --emails "a@example.com,b@example.com" \
   --gotenberg --app-memory 700 --migrate "npx prisma migrate deploy" >/dev/null 2>&1
 assert_status $? 0 "init succeeds"
 y=$(cat deploy/deploy.yml)
 assert_contains "$y" "client: acme" "client set"
-assert_contains "$y" "domain: erp.acme.com" "domain set"
-assert_contains "$y" "alert_emails: a@x.com,b@x.com" "emails set"
+assert_contains "$y" "domain: erp.example.com" "domain set"
+assert_contains "$y" "alert_emails: a@example.com,b@example.com" "emails set"
 assert_contains "$y" "uses_gotenberg: true" "gotenberg set"
 assert_contains "$y" 'migrate_cmd: "npx prisma migrate deploy"' "migrate set"
 for f in compose.yml Caddyfile maint/maintenance.html maint/down.html; do [[ -f "deploy/$f" ]] && pass "has $f" || fail "missing $f"; done
-out=$(bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.acme.com --emails a@x.com 2>&1)
+out=$(bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.example.com --emails a@example.com 2>&1)
 assert_contains "$out" "already exists" "refuses to overwrite"
 finish
 ```
@@ -1859,7 +1859,7 @@ Test note: in empty mode the check functions return "not found". In existing mod
 . "$(dirname "$0")/assert.sh"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 export PATH="$TESTS_DIR/stubs:$PATH" STUB_LOG="$T/log"
-cd "$T"; bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.acme.com --emails a@x.com --migrate "npm run m" >/dev/null 2>&1
+cd "$T"; bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.example.com --emails a@example.com --migrate "npm run m" >/dev/null 2>&1
 tgz=$(bash -c ". '$SKILL_DIR/scripts/lib.sh'; load_config; make_bundle abc123" 2>/dev/null)
 list=$(tar tzf "$tgz")
 for f in ./release.env ./app/compose.yml ./app/Caddyfile ./app/maint/maintenance.html ./host/edh-deploy.sh ./host/systemd/edh-backup.timer; do
@@ -2663,6 +2663,15 @@ Run this in a scratch project with the fixture app, plus a tiny Postgres-backed 
 16. `restore.sh disk`: with the `RequiresMountsFor=/data` drop-in in place, Docker comes back after the volume swap.
 17. A forced bootstrap failure leaves `bootstrap-failed`, and provision then fails fast. The dpkg lock timeout and snap seed wait behave correctly on a real first boot.
 18. `describe-instance-types` reports arm64 for t4g, and `describe-subnets` with `default-for-az` returns the default subnets.
+19. `upgrade.sh os --reboot`: the reboot detection holds up (a ping newer than the one recorded just before the reboot vs. a heartbeat landing in that window).
+20. A full `restore.sh disk --snapshot …` run: unmount, swap, remount, Docker back, `/health`, old volume kept and tagged.
+21. Rebuild after `teardown.sh`: the new IP and the DNS update; and the `--keep-ip` path, where provision reuses the Elastic IP.
+22. From inside the app container, the AWS SDK uses the injected `AWS_REGION` and `EDH_UPLOADS_BUCKET` with the instance role.
+23. On Ubuntu: `docker compose config --format json` gives the caddy image, and a pinned caddy tag is used for `caddy validate`.
+24. SNS: `PendingConfirmation` reporting and the unsubscribe of a removed address, in both regions.
+25. The Route 53 health check's billing class (HTTPS, 30 s) against the ~$4/month monitoring estimate.
+26. The `memory.peak` cgroup path (`/sys/fs/cgroup/system.slice/docker-<id>.scope/memory.peak`) on Ubuntu 24.04.
+27. Where `maint.sh on` writes the bypass link when no TTY is available (agent sessions).
 
 Record findings in the design doc under "Validation results". Fix any bugs with a failing test first, then the fix.
 
