@@ -1,0 +1,45 @@
+# ec2-dedicated-host — one site, one app. Env (from compose): DOMAIN, MAINT_BYPASS, APP_PORT.
+#  - Planned maintenance: active while /srv/maint/ON exists (no reload needed).
+#  - Bypass: open https://<domain>/?maint_bypass=<token> once; a 24 h cookie lets you through.
+#  - Unplanned: if the app can't be reached, /srv/maint/down.html is served (auto-refreshes).
+{$DOMAIN} {
+	encode zstd gzip
+
+	@set_bypass query maint_bypass={$MAINT_BYPASS}
+	@maint {
+		file {
+			root /srv/maint
+			try_files /ON
+		}
+		not header Cookie *maint_bypass={$MAINT_BYPASS}*
+		not path /health
+	}
+
+	route {
+		handle @set_bypass {
+			header Set-Cookie "maint_bypass={$MAINT_BYPASS}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax"
+			redir * / 302
+		}
+		handle @maint {
+			root * /srv/maint
+			rewrite * /maintenance.html
+			header Retry-After 1800
+			header Cache-Control no-store
+			file_server {
+				status 503
+			}
+		}
+		handle {
+			reverse_proxy app:{$APP_PORT}
+		}
+	}
+
+	handle_errors 502 503 504 {
+		root * /srv/maint
+		rewrite * /down.html
+		header Cache-Control no-store
+		file_server {
+			status 503
+		}
+	}
+}
