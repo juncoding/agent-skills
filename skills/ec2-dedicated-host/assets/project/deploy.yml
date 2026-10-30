@@ -1,0 +1,17 @@
+# ec2-dedicated-host settings for this project. Flat `key: value` only (no nesting, no lists).
+client: acme                 # lowercase letters/digits/dashes; names every AWS resource
+env: prod
+region: ap-southeast-1
+domain: app.example.com      # A record must point at the server's Elastic IP
+alert_emails: ops@example.com            # comma-separated; required when monitoring: cloudwatch
+monitoring: cloudwatch       # cloudwatch | none
+instance_type: auto          # auto = sized from app_memory_mb + uses_gotenberg
+data_volume_gb: 20
+app_port: 3000
+app_memory_mb: 768           # container memory limit; also drives sizing
+uses_gotenberg: false        # true adds the PDF renderer (gotenberg) service
+backup_schedule: auto        # auto (hourly < 2 GB, else daily) | hourly | daily
+daily_backup_hour_utc: 18
+migrate_cmd: ""              # e.g. npx prisma migrate deploy  (no single quotes)
+dockerfile: Dockerfile
+build_context: .
