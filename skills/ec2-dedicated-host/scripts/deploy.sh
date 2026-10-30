@@ -21,86 +21,50 @@ require aws
 require_account
 require docker; require git; require curl
 
-# check_compose — checks deploy/compose.yml on Compose's own normalized config (docker compose config --format
-# json: anchors, aliases, every list style, interpolation and relative paths already resolved), not on its text.
-# It is rendered as the server would see it: compose.yml alone in a directory with empty app.env/postgres.env,
-# dummy values for the variables edh-deploy.sh sets, and the gotenberg profile on. Refused (each reported with
-# its service and key):
-#   data   — a bind mount of /data itself or of /data/backups (the backup manifest, which restores trust because
-#            the app can't reach it)
-#   host   — any other bind mount whose source isn't inside the compose directory or a /data/<subdir>; top-level
-#            volumes with driver_opts or external; privileged; cap_add, devices, device_cgroup_rules; pid, ipc,
-#            userns_mode, network_mode or cgroup "host"; an "unconfined" security_opt; volumes_from; a network
-#            named host or with the host driver; secrets/configs files outside the compose directory
-COMPOSE_CHECK_PY='import json, os, sys
-cfg = json.load(sys.stdin)
-dirs = [os.path.normpath(d) for d in sys.argv[1:]]
-out = []
-def bad(kind, where, why): out.append("%s\t%s: %s" % (kind, where, why))
-def inside(p):   # strictly inside the compose directory
-    return any(p.startswith(d + "/") for d in dirs)
-for name, svc in sorted((cfg.get("services") or {}).items()):
-    w = "service " + name
-    for v in svc.get("volumes") or []:
-        if v.get("type") != "bind":
-            continue
-        src = os.path.normpath(v.get("source") or "")
-        parts = src.split("/")
-        if src == "/data":
-            bad("data", w + ": volumes", "bind mount of the whole data directory /data")
-        elif src.startswith("/data/") and parts[2] == "backups":
-            bad("data", w + ": volumes", "bind mount of %s (the backup manifest)" % src)
-        elif not (src.startswith("/data/") or inside(src)):
-            bad("host", w + ": volumes", "bind mount of %s (allowed: ./<dir> next to compose.yml, /data/<dir>)" % src)
-    if svc.get("privileged") is True:
-        bad("host", w + ": privileged", "privileged mode")
-    for k in ("cap_add", "devices", "device_cgroup_rules", "volumes_from"):
-        if svc.get(k):
-            bad("host", w + ": " + k, "not allowed")
-    for k in ("pid", "ipc", "userns_mode", "network_mode", "cgroup"):
-        if str(svc.get(k) or "").lower() == "host":
-            bad("host", w + ": " + k, "host namespace")
-    for o in svc.get("security_opt") or []:
-        if "unconfined" in str(o):
-            bad("host", w + ": security_opt", str(o))
-for name, vol in sorted((cfg.get("volumes") or {}).items()):
-    if vol.get("driver_opts"):
-        bad("host", "volume " + name + ": driver_opts", "not allowed (a bind device)")
-    if vol.get("external"):
-        bad("host", "volume " + name + ": external", "not allowed")
-for name, net in sorted((cfg.get("networks") or {}).items()):
-    if net.get("name") == "host" or net.get("driver") == "host":
-        bad("host", "network " + name, "the host network")
-for top in ("secrets", "configs"):
-    for name, item in sorted((cfg.get(top) or {}).items()):
-        f = item.get("file")
-        if f and not inside(os.path.normpath(f)):
-            bad("host", "%s %s: file" % (top[:-1], name), "%s is outside the compose directory" % f)
-print("\n".join(out))'
+# compose_env <var=value>... — run the rest of the line under `env -i`: only PATH, HOME and the Docker client
+# settings pass through, so the operator's shell can't change what compose.yml renders to
+compose_env() {
+  local keep=() v
+  for v in PATH HOME DOCKER_HOST DOCKER_CONFIG DOCKER_CONTEXT; do
+    if [[ -n "${!v:-}" ]]; then keep+=("$v=${!v}"); fi
+  done
+  env -i ${keep[@]+"${keep[@]}"} "$@"
+}
+
+# check_compose — deploy/compose.yml against the skill's compose rules (assets/host/edh-compose-check.py, the same
+# check edh-deploy.sh runs on the server with the real values). It works on Compose's own normalized config
+# (docker compose config --format json: anchors, aliases, list styles, interpolation and paths resolved), rendered
+# as the server would: compose.yml alone in a directory with empty app.env/postgres.env, placeholder values for
+# the variables the server sets, the gotenberg profile on.
 check_compose() {
-  local d real json err hits data host
+  local d out vargs
   require_python
   d=$(mktemp -d) || die "mktemp failed"
-  cp deploy/compose.yml "$d/compose.yml" || { rm -rf "$d"; die "deploy/compose.yml missing"; }
-  : > "$d/app.env"; : > "$d/postgres.env"
-  real=$(cd "$d" && pwd -P)
-  # interpolation only from these values (the server's .env sets them); no .env file, no COMPOSE_* from the shell
-  if ! json=$(env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_ENV_FILES EDH_NAME=lintcheck APP_IMAGE=lint:check \
-       DOMAIN=lint.example.com MAINT_BYPASS=lint EDH_DATA_DIR=/data APP_PORT=3000 APP_MEMORY_MB=512 \
-       COMPOSE_PROFILES=gotenberg docker compose --project-directory "$d" -f "$d/compose.yml" config --format json 2>"$d/err"); then
-    err=$(cat "$d/err"); rm -rf "$d"
-    die "deploy/compose.yml is not valid for Compose (docker compose config failed; the server would refuse it too):
-$err"
+  mkdir "$d/app"
+  cp deploy/compose.yml "$d/app/compose.yml" || { rm -rf "$d"; die "deploy/compose.yml missing"; }
+  : > "$d/app/app.env"; : > "$d/app/postgres.env"
+  set -- EDH_NAME=lintcheck APP_IMAGE=lint:check DOMAIN=lint.example.com MAINT_BYPASS=lint EDH_DATA_DIR=/data \
+         APP_PORT=3000 APP_MEMORY_MB=512 COMPOSE_PROFILES=gotenberg
+  if ! compose_env "$@" docker compose --project-directory "$d/app" -f "$d/app/compose.yml" \
+       config --no-env-resolution --format json > "$d/cfg.json" 2>"$d/err"; then
+    out=$(cat "$d/err"); rm -rf "$d"
+    refuse "deploy/compose.yml is not valid for Compose (docker compose config failed; the server would refuse it too):
+$out"
   fi
-  hits=$(printf '%s' "$json" | python3 -I -c "$COMPOSE_CHECK_PY" "$d" "$real") || { rm -rf "$d"; die "could not check deploy/compose.yml"; }
+  if compose_env "$@" docker compose --project-directory "$d/app" -f "$d/app/compose.yml" \
+       config --variables --format json > "$d/vars.json" 2>/dev/null; then
+    vargs="--variables $d/vars.json"
+  else
+    warn "this Docker Compose can't list variables (config --variables): scanning deploy/compose.yml for them instead"
+    vargs="--scan $d/app/compose.yml"
+  fi
+  # shellcheck disable=SC2086  # vargs is "--option path" (mktemp paths have no spaces)
+  out=$(python3 -I "$EDH_SKILL_DIR/assets/host/edh-compose-check.py" "$d/cfg.json" "$d/app" $vargs 2>&1) || {
+    local rc=$?; rm -rf "$d"
+    if (( rc == 1 )); then refuse "deploy/$out"; fi
+    die "could not check deploy/compose.yml: $out"
+  }
   rm -rf "$d"
-  data=$(printf '%s\n' "$hits" | awk -F'\t' '$1 == "data" { print "  " $2 }')
-  host=$(printf '%s\n' "$hits" | awk -F'\t' '$1 == "host" { print "  " $2 }')
-  [[ -z "$data" ]] || die "deploy/compose.yml mounts the data directory or /data/backups into a container — refusing: that would put the backup manifest within the app's reach. Mount only subdirectories such as \${EDH_DATA_DIR:-/data}/caddy:
-$data${host:+
-$host}"
-  [[ -z "$host" ]] || die "deploy/compose.yml gives a container access to the server itself — refusing (see references/app-contract.md):
-$host"
 }
 
 # check_prod_source <dirty:0|1> — prod runs only what is on GitHub's prod branch: the current branch is

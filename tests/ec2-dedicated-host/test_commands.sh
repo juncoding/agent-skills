@@ -5,7 +5,8 @@ mkdir -p "$T/bin" "$T/s3"
 # fake docker / curl / dig: no image is built, no network is used
 # (`docker compose … config` runs for real: deploy.sh lints Compose's normalized config; it needs no daemon)
 REAL_DOCKER=$(command -v docker)
-printf '#!/bin/bash\necho "docker $*" >> "$STUB_LOG.docker"\ncase "$1" in login) cat >/dev/null ;; esac\nif [[ "$1" == compose && " $* " == *" config "* ]]; then exec "%s" "$@"; fi\nexit 0\n' "$REAL_DOCKER" > "$T/bin/docker"
+# (the log path is fixed: deploy.sh runs `docker compose config` under env -i, without STUB_LOG)
+printf '#!/bin/bash\necho "docker $*" >> "%s"\ncase "$1" in login) cat >/dev/null ;; esac\nif [[ "$1" == compose && " $* " == *" config "* ]]; then exec "%s" "$@"; fi\nexit 0\n' "$T/log.docker" "$REAL_DOCKER" > "$T/bin/docker"
 # curl: like the real one, -w still prints "000 ..." when the request fails
 printf '#!/bin/sh\nif [ "${FAKE_CURL_RC:-0}" != 0 ]; then printf "000 in 0.001s"; fi\nexit ${FAKE_CURL_RC:-0}\n' > "$T/bin/curl"
 printf '#!/bin/sh\necho 203.0.113.10\n' > "$T/bin/dig"
@@ -143,6 +144,36 @@ done
 compose_refused "access to the server itself" "$P" "$I" "    secrets: [pw]" "secrets:" "  pw:" "    file: /etc/passwd"
 compose_refused "access to the server itself" "$P" "$I" "    configs: [cf]" "configs:" "  cf:" "    file: ../outside.conf"
 compose_refused "access to the server itself" "$P" "$I" "    networks: [hostnet]" "networks:" "  hostnet:" "    name: host" "    external: true"
+# only the variables the server sets may be used: anything else would come from whatever shell renders the file
+compose_plus "$P" "$I" "    volumes:" '      - /data/uploads${APP_SUBDIR}:/x'
+out=$(APP_SUBDIR=uploads run deploy.sh --allow-dirty); rc=$?
+assert_status $rc 1 "compose: a variable from the operator's shell (APP_SUBDIR) is refused"
+assert_contains "$out" 'variable ${APP_SUBDIR}' "compose: the variable is named"
+cp "$T/compose.save" deploy/compose.yml
+compose_refused 'variable ${HOME}' "$P" "$I" "    volumes:" '      - /data/uploads${HOME:-/..}:/x'
+# next to compose.yml only subdirectories, never the skill's own files
+for m in ./app.env ./postgres.env ./.env ./compose.yml ./app.env.rollback ./compose.yml.prev ./previous_image ./maint-templates \
+         ./x.env/sub; do
+  compose_refused "reserved for the skill" "$P" "$I" "    volumes:" "      - $m:/x"
+done
+# /data/caddy and /data/maint belong to caddy, /data/postgres to postgres
+for m in /data/caddy /data/maint/x '${EDH_DATA_DIR:-/data}/postgres'; do
+  compose_refused "reserved for the" "$P" "$I" "    volumes:" "      - $m:/x"
+done
+cp deploy/compose.yml "$T/compose.save"
+awk '{ print } /^  app:$/ { print "    volumes:"; print "      - ${EDH_DATA_DIR:-/data}/caddy:/c" }' "$T/compose.save" > deploy/compose.yml
+out=$(run deploy.sh --allow-dirty); rc=$?
+assert_status $rc 1 "compose: /data/caddy in the app service is refused"
+assert_contains "$out" "service app: volumes: /data/caddy is reserved for the caddy service" "compose: /data/caddy in app: explained"
+cp "$T/compose.save" deploy/compose.yml
+# env_file / label_file inside the compose directory; app.env only for app, postgres.env only for postgres
+compose_refused "outside the compose directory" "$P" "$I" "    env_file: /etc/edh/edh.env"
+compose_refused "only app.env for app" "$P" "$I" "    env_file: ./app.env"
+compose_refused "only app.env for app" "$P" "$I" "    env_file:" "      - path: ./postgres.env" "        required: false"
+compose_refused "outside the compose directory" "$P" "$I" "    label_file: /etc/hosts"
+compose_refused "reserved for the skill" "$P" "$I" "    secrets: [s2]" "secrets:" "  s2:" "    file: ./app.env"
+# images are built by deploy.sh, never on the server
+compose_refused "build" "$P" "    build: ."
 # the violation names the service and the key
 compose_plus "$P" "$I" "    privileged: true"
 out=$(run deploy.sh --allow-dirty); rc=$?
@@ -158,14 +189,14 @@ cp "$T/compose.save" deploy/compose.yml
 compose_plus "$P" "$I" '    command: ["echo", "Loading..."]' "    privileged: false" "    volumes:" "      - appdata:/var/lib/x" \
   "      - ./extra:/extra:ro" "      - /tmp/anonymous" '      - "${EDH_DATA_DIR:-/data}/uploads:/uploads"' \
   "      - type: tmpfs" "        target: /scratch" "    secrets: [s1]" "      # - /var/run/docker.sock:/x (a comment)" \
-  "volumes:" "  appdata: {}" "secrets:" "  s1:" "    file: ./app.env"
+  "volumes:" "  appdata: {}" "secrets:" "  s1:" "    file: ./conf/s1.txt"
 out=$(EDH_YES=1 run deploy.sh --allow-dirty --allow-non-main); rc=$?   # prod + dirty tree: emergency flags
 [[ $rc == 0 ]] || printf '%s\n' "$out" | grep -A8 ERROR
 assert_status $rc 0 "compose with ordinary settings (named/anonymous/tmpfs volumes, ./dir, a data subdirectory) deploys"
 cp "$T/compose.save" deploy/compose.yml
 out=$(run deploy.sh); rc=$?
 assert_status $rc 0 "the scaffolded compose.yml passes the lint"
-assert_eq "$(git status --porcelain)" "" "compose.yml restored after the mount tests"
+assert_eq "$(git status --porcelain -- deploy/compose.yml)" "" "compose.yml restored after the mount tests"
 touch untracked
 out=$(run deploy.sh); rc=$?
 assert_status $rc 1 "uncommitted changes: deploy refuses"
@@ -265,6 +296,9 @@ assert_eq "$(calls 'ssm send-command')" "0" "rollback without consent sends noth
 out=$(run backup.sh now); rc=$?
 assert_status $rc 0 "backup now succeeds"
 assert_contains "$(script_n 1)" "/opt/edh/bin/edh-backup.sh --tag manual --force" "backup now runs a manual backup"
+out=$(STUB_SSM_RC=1 run backup.sh now); rc=$?
+assert_status $rc 1 "backup now: a failed backup (e.g. no app deployed yet) is reported as a failure"
+assert_contains "$out" "backup failed" "backup now: failure explained"
 printf 'db/hourly/app-20261030T010000Z.dump\t2026-10-30T01:00:05+00:00\t10\ndb/daily/app-20261029T180000Z.dump\t2026-10-29T18:00:09+00:00\t9\n' > "$T/list.tsv"
 : > "$T/log"
 out=$(STUB_S3_LIST="$T/list.tsv" run backup.sh list); rc=$?

@@ -33,10 +33,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 case "$TAG" in auto|safety|manual) ;; *) die "unknown tag: $TAG (auto, safety or manual)" ;; esac
-# before the first deploy there is no app (and no database) to back up: not a failure, so no hourly alert email
+# before the first deploy there is no app (and no database) to back up: for the hourly timer (auto) that is not a
+# failure, so no hourly alert email; a manual or safety backup was asked for, so it fails
 if [[ ! -f "$EDH_APP_DIR/compose.yml" ]]; then
-  log "no app deployed yet ($EDH_APP_DIR/compose.yml missing): nothing to back up"
-  exit 0
+  if [[ "$TAG" == auto ]]; then log "no app deployed yet ($EDH_APP_DIR/compose.yml missing): nothing to back up"; exit 0; fi
+  die "no app deployed yet ($EDH_APP_DIR/compose.yml missing): nothing to back up"
 fi
 case "${EDH_BACKUP_SCHEDULE:-auto}" in auto|hourly|daily) ;; *) die "EDH_BACKUP_SCHEDULE must be auto, hourly or daily" ;; esac
 edh_lock

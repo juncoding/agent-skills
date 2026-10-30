@@ -45,7 +45,7 @@ make_release() { # make_release <dir> <migrate_cmd>
   local r="$1"; mkdir -p "$r/app/maint" "$r/host/systemd"
   cp "$SKILL_DIR/assets/project/compose.yml" "$SKILL_DIR/assets/project/Caddyfile" "$r/app/"
   cp "$SKILL_DIR/assets/project/maint/"*.html "$r/app/maint/"
-  cp "$SKILL_DIR/assets/host/"edh-*.sh "$r/host/"
+  cp "$SKILL_DIR/assets/host/"edh-*.sh "$SKILL_DIR/assets/host/"edh-*.py "$r/host/"
   cat > "$r/release.env" <<EOF
 EDH_CLIENT=t
 EDH_ENV=prod

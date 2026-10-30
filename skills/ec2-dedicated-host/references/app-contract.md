@@ -99,32 +99,47 @@ them, drop old ones in a later release. For a risky or slow migration, `deploy.s
 `app_memory_mb` (default 768) is the container's hard memory limit and drives the server size
 (sizing.md). An app killed for memory restarts and shows the down page meanwhile.
 
-## 8. `deploy/compose.yml` rules (enforced by `deploy.sh` before anything is built)
+## 8. `deploy/compose.yml` rules (checked on the Mac by `deploy.sh` and again on the server)
 
 The scaffolded `compose.yml` is the template to keep. You may add services, environment and settings, but:
 
-- **Bind mounts only from inside the compose directory or a `/data/<dir>`**: `./<dir>` (next to
-  compose.yml; on the server `/opt/edh/app/<dir>`), `/data/<dir>` or `${EDH_DATA_DIR:-/data}/<dir>`. Never the
-  compose directory itself, never `/data` itself and never `/data/backups` — it holds the backup manifest,
-  which restores trust because the app can't reach it. Named, anonymous and tmpfs volumes are fine.
+- **Variables:** only `EDH_NAME`, `APP_IMAGE`, `APP_PORT`, `APP_MEMORY_MB`, `DOMAIN`, `MAINT_BYPASS`,
+  `COMPOSE_PROFILES`, `EDH_DATA_DIR`, `EDH_HTTP_PORT`, `EDH_HTTPS_PORT` — the ones the server sets. Any other
+  `${VAR}` is refused by name (it would take whatever value the shell that renders the file happens to have).
+- **Bind mounts next to `compose.yml`** (on the server `/opt/edh/app`): subdirectories only (`./uploads`), never
+  a top-level file and never the skill's own entries: `compose.yml`, `.env`, `*.env`, `*.prev`, `*.rollback`,
+  `previous_image`, `maint-templates`.
+- **Bind mounts under `/data`:** a `/data/<dir>` (or `${EDH_DATA_DIR:-/data}/<dir>`), never `/data` itself and
+  never `/data/backups` — it holds the backup manifest, which restores trust because the app can't reach it.
+  `/data/caddy` and `/data/maint` are only for `caddy`, `/data/postgres` only for `postgres`.
+- **Nothing else from the server:** any other bind source is refused. A bind source that is a **symlink on the
+  server is followed** by Docker, so never create symlinks under `/data`.
+- **`env_file` / `label_file`:** inside the compose directory; the only top-level ones are `app.env` (for `app`)
+  and `postgres.env` (for `postgres`). `secrets`/`configs` `file:` likewise inside and not reserved.
+- **No `build:`** — images are built by `deploy.sh` on the Mac and pushed, never on the server.
 - **Top-level volumes** may not use `driver_opts` (e.g. a `local` volume binding a host `device`) or be
-  `external`.
+  `external`. Named, anonymous and tmpfs volumes are fine.
 - **No access to the server itself**: no `privileged: true`; no `cap_add`, `devices`, `device_cgroup_rules`
   or `volumes_from`; no `pid`, `ipc`, `userns_mode`, `network_mode` or `cgroup` set to `host`; no `security_opt`
-  with `unconfined`; no network named `host` or using the `host` driver; `secrets`/`configs` files only from
-  inside the compose directory.
+  with `unconfined`; no network named `host` or using the `host` driver.
 - Keep the service names `caddy`, `app`, `postgres` (the host scripts use them), `name: ${EDH_NAME:?}`,
   and `env_file` with `format: raw` (needs Compose ≥ 2.30 — on the server, installed by bootstrap, and on the
   operator's Mac for the check below).
 
-**How it is checked:** not by matching the file's text, but on Compose's own **normalized** configuration —
-`deploy.sh` runs `docker compose config --format json` on a copy of `compose.yml` (alone in a temp directory
-with empty `app.env`/`postgres.env`, dummy values for the variables the server sets, and the `gotenberg`
-profile enabled), so anchors and aliases, every list style, interpolation, `..` and `.` path segments are
-already resolved; paths are compared after normalization. If Compose itself rejects the file, deploy refuses
-with Compose's error (the server would too). Each violation is reported with its service and key. On the
-server, `docker compose config` and `caddy validate` (with the caddy image `compose.yml` uses) must also
-pass before anything is installed.
+**How it is checked:** by one script, `assets/host/edh-compose-check.py`, run twice on Compose's own
+**normalized** configuration (`docker compose config --format json` — anchors, aliases, every list style,
+interpolation and `.`/`..` path segments resolved; paths compared after resolving symlinks), not on the
+file's text:
+
+1. on the Mac by `deploy.sh`, before anything is built: `compose.yml` alone in a temp directory with empty
+   `app.env`/`postgres.env`, rendered under `env -i` with placeholder values and the `gotenberg` profile;
+2. on the server by `edh-deploy.sh`, before anything is installed: the staged `compose.yml` rendered with the
+   real values it is about to get. A refusal there ends the deploy with exit 1, nothing changed.
+
+The variable list comes from `docker compose config --variables`; a Compose too old for that gets a scan of
+the file instead (and says so). If Compose itself rejects the file, the deploy refuses with Compose's error.
+Each violation is reported with its service and key. `caddy validate` (with the caddy image `compose.yml`
+uses) must also pass on the server.
 
 **Only `deploy/compose.yml`, `deploy/Caddyfile` and `deploy/maint/*.html` are shipped to the server.** Any
 other file `compose.yml` refers to (a config file, an extra `env_file`, a `build:` context) does not reach it:

@@ -131,7 +131,7 @@ message; don't retry blindly.
 | deploy: `new version failed its health check — rolled back to the previous version` | Site is up on the old version; an alert email went out. Look at app logs/`/health`; fix, commit, redeploy. |
 | deploy: `no healthy version is running — the site may be down` | **Urgent.** Run `status.sh`; see `references/disaster-runbook.md`. |
 | deploy/rollback: `still running on the server after the timeout` | Not necessarily failed: run `status.sh` to see how it ended. |
-| deploy: compose refusal (`backup manifest` / `access to the server itself`) | `deploy/compose.yml` breaks the rules in `references/app-contract.md`; fix the file. |
+| deploy: compose refusal (`backup manifest` / `access to the server itself` / `breaks the compose rules`) | `deploy/compose.yml` breaks the rules in `references/app-contract.md` (checked on the Mac and again on the server); fix the file. |
 | rollback: `previous version is unhealthy … stayed on the current version` | Nothing changed; the old image can't run with today's DB/config. |
 | restore: `not in this server's backup manifest` | Possible tampering, or the manifest was lost — read `references/backup-restore.md` before `--unverified`. |
 | restore disk: `swap stopped half way` (with commands) | Relay the printed state and put-back commands; ask before running them. |

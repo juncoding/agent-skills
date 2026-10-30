@@ -221,6 +221,34 @@ caddy_image() {
   printf '%s' "$img"
 }
 
+# compose_check — the skill's compose rules (edh-compose-check.py, the same check deploy.sh runs on the Mac), on
+# the staged compose.yml rendered with the real values it is about to get. Under env -i (only PATH, HOME and the
+# Docker client settings), so nothing in this shell's environment changes what it renders to.
+compose_check() {
+  local keep=() v out rc w="$STAGE/.check" vargs=()
+  for v in PATH HOME DOCKER_HOST DOCKER_CONFIG DOCKER_CONTEXT; do
+    if [[ -n "${!v:-}" ]]; then keep+=("$v=${!v}"); fi
+  done
+  mkdir -m 700 "$w"
+  if ! env -i "${keep[@]}" docker compose --project-directory "$STAGE" -f "$STAGE/compose.yml" \
+       config --no-env-resolution --format json > "$w/cfg.json" 2>"$w/err"; then
+    tail -20 "$w/err" >&2
+    die "the release's compose.yml is invalid — nothing installed"
+  fi
+  if env -i "${keep[@]}" docker compose --project-directory "$STAGE" -f "$STAGE/compose.yml" \
+       config --variables --format json > "$w/vars.json" 2>/dev/null; then
+    vargs=(--variables "$w/vars.json")
+  else
+    log "this Docker Compose can't list variables (config --variables): scanning compose.yml for them instead"
+    vargs=(--scan "$STAGE/compose.yml")
+  fi
+  rc=0
+  out=$(python3 -I "$REL/host/edh-compose-check.py" "$w/cfg.json" "$STAGE" --data-dir "$EDH_DATA_DIR" "${vargs[@]}" 2>&1) || rc=$?
+  rm -rf "$w"   # the rendered config holds the bypass token
+  if (( rc == 1 )); then printf '%s\n' "$out" >&2; die "the release's compose.yml breaks the compose rules — nothing installed"; fi
+  (( rc == 0 )) || die "could not check the release's compose.yml: $out"
+}
+
 # validate_release — check the release's compose.yml and Caddyfile in a staging dir before installing anything
 validate_release() {
   local out caddy_img
@@ -230,6 +258,7 @@ validate_release() {
   cp "$REL/app/Caddyfile" "$STAGE/caddy/Caddyfile"
   cp -p "$EDH_APP_DIR/app.env" "$EDH_APP_DIR/postgres.env" "$STAGE/"
   write_compose_env "${PREV:-$IMAGE}" "$STAGE"
+  compose_check
   out=$(docker compose --project-directory "$STAGE" -f "$STAGE/compose.yml" config -q 2>&1) \
     || { printf '%s\n' "$out" | tail -20 >&2; die "the release's compose.yml is invalid — nothing installed"; }
   caddy_img=$(caddy_image)

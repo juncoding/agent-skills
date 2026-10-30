@@ -10,6 +10,7 @@ log()  { printf '\033[1;34m==>\033[0m %s\n' "$*" >&2; }
 ok()   { printf '\033[1;32m  ✓\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[1;33m  !\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+refuse() { die "$@"; }   # a refusal (the request breaks a rule), as opposed to something failing
 require() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
 
 # cfg_get <file> <key> [default] — value of a flat `key: value` line; strips quotes and trailing comments.
@@ -319,7 +320,7 @@ EOV
 }
 
 # make_bundle <release-id> — tgz of deploy/ (compose.yml, Caddyfile, maint pages) + this skill's host scripts
-# (every edh-*.sh and systemd unit; never bootstrap.sh) + release.env; prints its path.
+# (every edh-*.sh, edh-*.py and systemd unit; never bootstrap.sh) + release.env; prints its path.
 # Usually called as tgz=$(make_bundle ...), where set -e is off: every step checks its own result.
 make_bundle() {
   local d
@@ -327,7 +328,8 @@ make_bundle() {
   mkdir -p "$d/app/maint" "$d/host/systemd" || die "make_bundle: cannot create $d"
   cp deploy/compose.yml deploy/Caddyfile "$d/app/" || die "make_bundle: deploy/compose.yml or deploy/Caddyfile missing"
   cp deploy/maint/maintenance.html deploy/maint/down.html "$d/app/maint/" || die "make_bundle: deploy/maint/*.html missing"
-  cp "$EDH_SKILL_DIR"/assets/host/edh-*.sh "$d/host/" || die "make_bundle: cannot copy the host scripts"
+  cp "$EDH_SKILL_DIR"/assets/host/edh-*.sh "$EDH_SKILL_DIR"/assets/host/edh-*.py "$d/host/" \
+    || die "make_bundle: cannot copy the host scripts"
   cp "$EDH_SKILL_DIR"/assets/host/systemd/* "$d/host/systemd/" || die "make_bundle: cannot copy the systemd units"
   ( release_env "$1" ) > "$d/release.env" || { rm -rf "$d"; die "make_bundle: cannot write release.env"; }
   # COPYFILE_DISABLE: no macOS ._* metadata files in the archive (the server's GNU tar would extract them)

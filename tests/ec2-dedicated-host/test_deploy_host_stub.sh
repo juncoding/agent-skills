@@ -10,13 +10,17 @@ export EDH_NO_SYSTEMD=1 EDH_SKIP_PULL=1 EDH_SKIP_PRUNE=1 EDH_HEALTH_TRIES=1 EDH_
 printf '%s\t%s\n' /t/prod/_edh/postgres-password pw123abc /t/prod/_edh/maint-bypass tok123 > "$STUB_SSM"
 # fake docker: logs every call; a migrate_cmd starting with "exit" fails; pg_dump fails with
 # FAKE_DUMP_FAIL=1; the app's /health answers only on port FAKE_HEALTHY_PORT
-cat > "$T/fake/docker" <<'EOS'
+# `compose … config` runs for real (the compose check renders the staged compose.yml; it needs no daemon)
+REAL_DOCKER=$(command -v docker)
+cat > "$T/fake/docker" <<EOS
 #!/bin/bash
-echo "docker $*" >> "$FAKE_DOCKER_LOG"
+echo "docker \$*" >> "$T/docker.log"
+if [[ "\$1" == compose && " \$* " == *" config "* ]]; then exec "$REAL_DOCKER" "\$@"; fi
+EOS
+cat >> "$T/fake/docker" <<'EOS'
 if [[ "$1" == login ]]; then cat >/dev/null; fi
 case "$*" in
   *" run --rm --no-deps"*) if [[ "$*" == *"sh -c exit"* ]]; then exit 3; fi ;;
-  *"config --format json"*) echo '{"services":{"caddy":{"image":"caddy:2.10-alpine"}}}' ;;
   *"pg_database_size"*) echo 100 ;;
   *" pg_dump "*) if [[ -n "${FAKE_DUMP_FAIL:-}" ]]; then exit 1; fi; echo PGDMP-fake ;;
   *" wget "*)
@@ -31,7 +35,7 @@ make_release() { # make_release <dir> <migrate_cmd> <app_port>
   local r="$1"; mkdir -p "$r/app/maint" "$r/host/systemd"
   cp "$SKILL_DIR/assets/project/compose.yml" "$SKILL_DIR/assets/project/Caddyfile" "$r/app/"
   cp "$SKILL_DIR/assets/project/maint/"*.html "$r/app/maint/"
-  cp "$SKILL_DIR/assets/host/"edh-*.sh "$r/host/"
+  cp "$SKILL_DIR/assets/host/"edh-*.sh "$SKILL_DIR/assets/host/"edh-*.py "$r/host/"
   cat > "$r/release.env" <<EOV
 EDH_CLIENT=t
 EDH_ENV=prod
@@ -63,6 +67,22 @@ assert_status "$rc" 0 "backup before the first deploy: exit 0"
 assert_contains "$out" "no app deployed yet" "backup before the first deploy: says why it does nothing"
 assert_eq "$(grep -c 'sns publish' "$STUB_LOG")" "0" "backup before the first deploy: no 'backup failed' email"
 assert_eq "$(grep -c 'put-object' "$STUB_LOG")" "0" "backup before the first deploy: nothing uploaded"
+
+# manual and safety backups are asked for on purpose: before the first deploy they fail loudly
+for tag in manual safety; do
+  out=$(EDH_ENV_FILE="$T/release0.env" EDH_BIN_DIR="$T/r0/host" bash "$T/r0/host/edh-backup.sh" --tag "$tag" --force 2>&1); rc=$?
+  assert_status "$rc" 1 "--tag $tag before the first deploy: fails"
+  assert_contains "$out" "no app deployed yet" "--tag $tag before the first deploy: explained"
+done
+
+# ============ the server runs the same compose check, with the real values, before installing anything
+make_release "$T/rx" "echo migrated" 3000
+printf '  probe:\n    image: busybox\n    env_file: /etc/edh/edh.env\n' >> "$T/rx/app/compose.yml"
+rc=$(deploy "$T/rx" img:x)
+assert_status "$rc" 1 "server compose check: a refused compose.yml exits 1"
+assert_contains "$(cat "$T/out")" "outside the compose directory" "server compose check: explained"
+assert_eq "$([[ -e "$EDH_APP_DIR/compose.yml" ]] && echo installed || echo none)" "none" "server compose check: nothing installed"
+assert_contains "$(grep -c 'config --no-env-resolution --format json' "$T/docker.log")" "1" "server compose check: normalized config rendered"
 
 # ============ first deploy, migration fails: nothing to fall back to and nothing was serving
 make_release "$T/r1" "exit 3" 3000

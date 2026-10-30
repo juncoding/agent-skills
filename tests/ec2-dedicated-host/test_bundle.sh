@@ -11,7 +11,7 @@ for f in ./release.env ./app/compose.yml ./app/Caddyfile ./app/maint/maintenance
          ./host/systemd/edh-backup.timer; do
   assert_contains "$list" "$f" "bundle has $f"
 done
-for f in "$SKILL_DIR"/assets/host/edh-*.sh; do assert_contains "$list" "./host/$(basename "$f")" "bundle has host/$(basename "$f")"; done
+for f in "$SKILL_DIR"/assets/host/edh-*.sh "$SKILL_DIR"/assets/host/edh-*.py; do assert_contains "$list" "./host/$(basename "$f")" "bundle has host/$(basename "$f")"; done
 for f in "$SKILL_DIR"/assets/host/systemd/*; do assert_contains "$list" "./host/systemd/$(basename "$f")" "bundle has host/systemd/$(basename "$f")"; done
 assert_not_contains "$list" "bootstrap.sh" "bootstrap is not shipped in bundles"
 assert_not_contains "$list" "._" "no macOS AppleDouble files in the bundle"
