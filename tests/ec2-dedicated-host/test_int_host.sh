@@ -256,6 +256,23 @@ out=$(bash "$EDH_BIN_DIR/edh-rollback.sh" 2>&1); rc=$?
 assert_status "$rc" 1 "edh-rollback.sh without a previous image fails"
 assert_contains "$out" "no previous image recorded" "edh-rollback.sh without a previous image explains"
 mv "$T/previous_image.keep" "$T/app/previous_image"
+# previous image unhealthy → stays on the current image, with its app.env
+cp "$T/app/previous_image" "$T/previous_image.keep"; echo edh-fixture:bad > "$T/app/previous_image"
+cp -p "$T/app/app.env" "$T/app.env.keep"; cp -p "$T/app/app.env.rollback" "$T/app.env.rollback.keep"
+nlog=$(wc -l < "$T/data/deploys.log")
+step
+out=$(bash "$EDH_BIN_DIR/edh-rollback.sh" 2>&1); rc=$?
+assert_status "$rc" 1 "edh-rollback.sh to an unhealthy previous image fails"
+assert_eq "$(img)" "edh-fixture:good" "unhealthy previous image: .env keeps the current image"
+assert_eq "$(site)" "fixture-ok" "unhealthy previous image: site still serves the current image"
+assert_eq "$(dcx exec -T app printenv API_KEY 2>&1)" "secret-value" "unhealthy previous image: app runs with the current secrets"
+assert_eq "$(cmp -s "$T/app/app.env" "$T/app.env.keep" && cmp -s "$T/app/app.env.rollback" "$T/app.env.rollback.keep" \
+  && echo same)" "same" "unhealthy previous image: app.env and app.env.rollback restored"
+assert_eq "$(cat "$T/app/previous_image")" "edh-fixture:bad" "unhealthy previous image: previous_image unchanged"
+assert_eq "$(alerted "rollback failed")" "yes" "unhealthy previous image: alert sent"
+assert_contains "$(cat "$STUB_LOG")" "rollback failed — stayed on edh-fixture:good" "unhealthy previous image: alert names the image kept"
+assert_eq "$(wc -l < "$T/data/deploys.log")" "$nlog" "unhealthy previous image: nothing added to deploys.log"
+mv "$T/previous_image.keep" "$T/app/previous_image"; rm -f "$T/app.env.keep" "$T/app.env.rollback.keep"
 
 # same image redeployed and now failing → falls back to previous_image
 assert_status "$(deploy "$T/r1" edh-fixture:good2)" 0 "deploy good2 again"
