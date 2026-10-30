@@ -17,3 +17,4 @@ daily_backup_hour_utc: 18
 migrate_cmd: ""              # e.g. npx prisma migrate deploy  (no single quotes)
 dockerfile: Dockerfile
 build_context: .
+prod_branch: main            # env prod deploys only exactly origin/<prod_branch>

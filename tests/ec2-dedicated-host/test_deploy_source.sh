@@ -44,11 +44,48 @@ echo y > local && git add local && git commit -qm "local only"
 out=$(run); rc=$?
 assert_status $rc 1 "ahead of origin/main: refused"
 assert_contains "$out" "1 commit(s) that are not on origin/main" "ahead: explained"
-assert_contains "$out" "git push" "ahead: says to push"
+assert_contains "$out" "push them through your usual review" "ahead: says to push (through review)"
 assert_eq "$(shipped)" "00" "ahead: nothing built or shipped"
 git push -q origin main
 out=$(run); rc=$?
 assert_status $rc 0 "after pushing: deploys"
+
+# ============ uncommitted changes in prod: --allow-dirty alone is not enough
+echo dirty > scratch.txt
+out=$(run --allow-dirty); rc=$?
+assert_status $rc 1 "prod, dirty tree, --allow-dirty: refused"
+assert_contains "$out" "uncommitted changes" "prod, dirty tree: explained"
+assert_contains "$out" "--allow-non-main" "prod, dirty tree: names the emergency override"
+assert_eq "$(shipped)" "00" "prod, dirty tree: nothing built or shipped"
+out=$(run --allow-dirty --allow-non-main </dev/null); rc=$?
+assert_status $rc 1 "prod, dirty tree, both flags, no consent: aborted"
+assert_eq "$(shipped)" "00" "prod, dirty tree, no consent: nothing built or shipped"
+out=$(EDH_YES=1 run --allow-dirty --allow-non-main); rc=$?
+assert_status $rc 0 "prod, dirty tree, both flags, consent: deploys"
+assert_contains "$out" "EMERGENCY" "prod, dirty tree: EMERGENCY warning"
+assert_contains "$out" "with uncommitted changes" "prod, dirty tree: the warning says so"
+rm -f scratch.txt
+
+# ============ prod_branch: another branch name for prod
+git checkout -q -b release && git push -q origin release
+sed 's/^prod_branch: .*/prod_branch: release/' deploy/deploy.yml > "$T/pb.yml" && cp "$T/pb.yml" deploy/deploy.yml
+git commit -qam "prod from release" && git push -q origin release
+out=$(run); rc=$?
+assert_status $rc 0 "prod_branch release: deploying release = origin/release succeeds"
+git checkout -q -b feature-z
+out=$(run); rc=$?
+assert_status $rc 1 "prod_branch release: another branch is refused"
+assert_contains "$out" "on branch 'feature-z', not release" "prod_branch release: explained with the branch name"
+git checkout -q release
+git remote set-url origin "$T/missing.git"
+out=$(run); rc=$?
+assert_contains "$out" "could not fetch release from origin" "prod_branch: the fetch failure names the branch"
+git remote set-url origin "$T/origin.git"
+git checkout -q main
+sed 's/^prod_branch: .*/prod_branch: -x/' "$T/pb.yml" > deploy/deploy.yml
+out=$(run --allow-dirty); rc=$?
+assert_contains "$out" "prod_branch must be a git branch name" "an invalid prod_branch is refused"
+git checkout -q -- deploy/deploy.yml
 
 # ============ on another branch
 git checkout -q -b hotfix-x

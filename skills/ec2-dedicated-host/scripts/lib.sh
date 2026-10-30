@@ -52,6 +52,7 @@ load_config() {
   EDH_MIGRATE_CMD=$(cfg_get "$f" migrate_cmd "")
   EDH_DOCKERFILE=$(cfg_get "$f" dockerfile Dockerfile)
   EDH_BUILD_CONTEXT=$(cfg_get "$f" build_context .)
+  EDH_PROD_BRANCH=$(cfg_get "$f" prod_branch main)
   # cfg_get strips matched quotes only, so a value still starting with a quote was never closed.
   local kv var
   for kv in client:EDH_CLIENT env:EDH_ENV region:EDH_REGION account_id:EDH_ACCOUNT_ID domain:EDH_DOMAIN \
@@ -60,7 +61,7 @@ load_config() {
             uses_gotenberg:EDH_USES_GOTENBERG app_uses_instance_role:EDH_APP_USES_INSTANCE_ROLE \
             backup_schedule:EDH_BACKUP_SCHEDULE \
             daily_backup_hour_utc:EDH_DAILY_HOUR_UTC migrate_cmd:EDH_MIGRATE_CMD dockerfile:EDH_DOCKERFILE \
-            build_context:EDH_BUILD_CONTEXT; do
+            build_context:EDH_BUILD_CONTEXT prod_branch:EDH_PROD_BRANCH; do
     var="${kv#*:}"
     case "${!var}" in \"*|\'*) die "unclosed quote in ${kv%%:*}" ;; esac
   done
@@ -96,6 +97,10 @@ validate_config() {
   EDH_APP_PORT=$((10#$EDH_APP_PORT))
   EDH_DAILY_HOUR_UTC=$((10#$EDH_DAILY_HOUR_UTC))
   [[ "$EDH_MIGRATE_CMD" != *"'"* ]] || die "migrate_cmd must not contain single quotes"
+  # a plain git branch name (it goes to git fetch): no leading dash or dot, no "..", "//", "@{", or trailing "/" / ".lock"
+  [[ "$EDH_PROD_BRANCH" =~ ^[A-Za-z0-9_][A-Za-z0-9._/-]*$ && "$EDH_PROD_BRANCH" != *..* && "$EDH_PROD_BRANCH" != *//* \
+     && "$EDH_PROD_BRANCH" != */ && "$EDH_PROD_BRANCH" != *.lock && "$EDH_PROD_BRANCH" != */.* ]] \
+    || die "prod_branch must be a git branch name like main: '$EDH_PROD_BRANCH'"
   if [[ "$EDH_MONITORING" == cloudwatch && -z "$EDH_ALERT_EMAILS" ]]; then
     die "alert_emails required when monitoring: cloudwatch"
   fi

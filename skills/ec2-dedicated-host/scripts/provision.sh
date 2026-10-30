@@ -354,7 +354,7 @@ if (( APPLY )); then
   fi
   (( st == 0 )) || die "bootstrap did not finish within 10 minutes — check /var/log/edh-bootstrap.log via Session Manager"
   ok "server ready: $EDH_IID at $EIP_IP"
-  if [[ "$EDH_MONITORING" == cloudwatch ]]; then "$(dirname "$0")/monitoring.sh" add; fi
+  if [[ "$EDH_MONITORING" == cloudwatch ]]; then "$BASH" "$(dirname "$0")/monitoring.sh" add; fi
   log "DNS: point an A record for $EDH_DOMAIN to $EIP_IP (needed before the first deploy can get HTTPS)"
 else
   warn "attach volume, associate IP, snapshot policy, bootstrap wait$( [[ "$EDH_MONITORING" == cloudwatch ]] && echo ', monitoring')"

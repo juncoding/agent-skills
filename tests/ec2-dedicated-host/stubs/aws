@@ -197,7 +197,7 @@ PY
     if [[ -n "${STUB_SNS_SUBS:-}" ]]; then printf '%s\n' "$STUB_SNS_SUBS"; else echo None; fi ;;
   "ec2 describe-snapshots")   # STUB_SNAP_TAGS: the snapshot's edh:client<TAB>edh:env (default: acme, prod)
     printf '%s\n' "${STUB_SNAP_TAGS:-acme	prod}" ;;
-  "ec2 create-volume") echo "${STUB_NEW_VOL:-vol-new}" ;;
+  "ec2 create-volume") echo vol-new ;;
   "ec2 attach-volume")   # STUB_ATTACH_FAIL=1: refused
     if [[ -n "${STUB_ATTACH_FAIL:-}" ]]; then echo "An error occurred (IncorrectState) when calling the AttachVolume operation: stub" >&2; exit 254; fi
     echo attaching ;;
@@ -249,7 +249,7 @@ PY
         describe-vpcs) echo vpc-stub ;;
         describe-instances)
           case "$*" in
-            *HttpPutResponseHopLimit*) echo "${STUB_HOP:-2}" ;;
+            *HttpPutResponseHopLimit*) echo 2 ;;
             # STUB_DOT_VOLUMES: volumes the server deletes when it is terminated (DeleteOnTermination=true)
             *BlockDeviceMappings*) echo "${STUB_DOT_VOLUMES:-vol-root}" ;;
             *"[InstanceType,"*) printf '%s\tap-southeast-1a\n' "${STUB_ITYPE:-t4g.medium}" ;;

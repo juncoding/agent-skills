@@ -42,8 +42,8 @@ for s in json.load(sys.stdin)["Statement"]:
     out.append("%s:%s:%s:%s" % (s["Effect"], ",".join(sorted(lst(s["Action"]))), ",".join(lst(s["Resource"])),
                                 json.dumps(s.get("Condition", {}), sort_keys=True)))
 print(" | ".join(sorted(out)))' 2>&1)
-assert_eq "$chk" 'Allow:cloudwatch:PutMetricData:*:{"StringEquals": {"cloudwatch:namespace": "CWAgent/acme-prod"}} | Allow:ec2:DescribeTags,ec2:DescribeVolumes:*:{}' \
-  "cwagent policy: PutMetricData only in namespace CWAgent/acme-prod, plus DescribeTags/DescribeVolumes"
+assert_eq "$chk" 'Allow:cloudwatch:PutMetricData:*:{"StringEquals": {"cloudwatch:namespace": "CWAgent/acme-prod"}} | Allow:ec2:DescribeTags:*:{}' \
+  "cwagent policy: PutMetricData only in namespace CWAgent/acme-prod, plus DescribeTags"
 f=$(grep 'policy-name edh-cwagent' "$T/log" | grep -o 'file://[^ ]*' | sed 's#file://##')
 [[ -n "$f" && ! -e "$f" ]] && pass "rendered cwagent policy temp file removed" || fail "cwagent policy temp file left: $f"
 # backup alarm: BackupFresh heartbeat in the client's own namespace, whatever the backup schedule

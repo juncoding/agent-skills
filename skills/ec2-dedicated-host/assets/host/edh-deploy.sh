@@ -37,20 +37,43 @@ save_prev() { # copy the live config to *.prev before changing anything
   done
   SAVED=1
 }
-restore_prev() { # restore_prev <file>... — put back the copies made by save_prev
+restore_prev() { # restore_prev <file>... — put back the copies made by save_prev (a file that didn't exist goes)
   local f
   (( SAVED )) || return 0
-  for f in "$@"; do if [[ -f "$EDH_APP_DIR/$f.prev" ]]; then cp -p "$EDH_APP_DIR/$f.prev" "$EDH_APP_DIR/$f"; fi; done
+  for f in "$@"; do
+    if [[ -f "$EDH_APP_DIR/$f.prev" ]]; then cp -p "$EDH_APP_DIR/$f.prev" "$EDH_APP_DIR/$f"; else rm -f "$EDH_APP_DIR/$f"; fi
+  done
 }
 
-# revert_infra — after restore_prev: caddy/postgres may already run from the release's files, so bring the
-# previous ones back (only if they were touched). Non-zero if the app then fails /health.
+# revert_infra [--no-health] — after restore_prev: caddy/postgres may already run from the release's files, so
+# bring the previous ones back (only if they were touched). Non-zero if the app then fails /health.
 revert_infra() {
-  (( INFRA )) || return 0
-  # shellcheck disable=SC2086
-  dc up -d --remove-orphans $services >/dev/null 2>&1 || log "could not restart $services with the previous configuration"
-  reload_caddy_once
+  if (( INFRA )); then
+    # shellcheck disable=SC2086
+    dc up -d --remove-orphans $services >/dev/null 2>&1 || log "could not restart $services with the previous configuration"
+    reload_caddy_once
+  fi
+  if [[ "${1:-}" == --no-health ]] || (( ! INFRA )); then return 0; fi
   wait_health
+}
+
+# restore_env_file — put back the previous /etc/edh/edh.env (saved before the release's was installed) and load
+# it again, so health checks after an abort use the settings (e.g. the app port) the previous version runs with
+restore_env_file() {
+  (( ENV_SAVED )) || return 0
+  cp -p "$EDH_ENV_FILE.prev" "$EDH_ENV_FILE" || { log "could not restore $EDH_ENV_FILE"; return 0; }
+  # shellcheck disable=SC1090
+  . "$EDH_ENV_FILE"
+}
+
+# abort_first_deploy <subject> <message> — an abort with no previous version: nothing was serving, so there is
+# nothing to health-check or fall back to
+abort_first_deploy() {
+  revert_infra --no-health
+  finish_maint || true
+  alert "$1" "$2 There is no previous version — nothing was serving."
+  log "no previous version — nothing was serving"
+  EXPECTED=1; exit 1
 }
 
 on_exit() {
@@ -65,6 +88,10 @@ on_exit() {
   log "deploy aborted at line $line (exit $rc): restoring the previous configuration"
   # shellcheck disable=SC2086
   restore_prev $KEPT
+  restore_env_file
+  if [[ -z "$PREV" ]]; then
+    abort_first_deploy "deploy aborted at line $line" "Deploying $IMAGE stopped at line $line (exit $rc)."
+  fi
   if (( SWAPPED )); then
     dc up -d app >/dev/null 2>&1 || log "could not restart the app with the previous configuration"
     reload_caddy_once
@@ -86,10 +113,14 @@ on_exit() {
   alert "deploy aborted at line $line" "Deploying $IMAGE failed before the switch (exit $rc); the previous version is still running. See the deploy output."
   exit 1
 }
+# the image running now (empty on a first deploy), known before anything can fail
+PREV=$(sed -n 's/^APP_IMAGE=//p' "$EDH_APP_DIR/.env" 2>/dev/null || true)
+ENV_SAVED=0   # 1 once the previous edh.env is saved as edh.env.prev
 trap 'on_exit $LINENO' EXIT
 edh_lock
 install -d -m 755 "$EDH_BIN_DIR" "$(dirname "$EDH_ENV_FILE")"
 install -m 755 "$REL"/host/edh-*.sh "$EDH_BIN_DIR"/
+if [[ -f "$EDH_ENV_FILE" ]]; then cp -p "$EDH_ENV_FILE" "$EDH_ENV_FILE.prev" && ENV_SAVED=1; fi
 install -m 644 "$REL/release.env" "$EDH_ENV_FILE"
 # shellcheck source-path=SCRIPTDIR source=edh-lib.sh
 . "${EDH_BIN_DIR:-/opt/edh/bin}/edh-lib.sh" || { echo "edh-deploy: cannot load edh-lib.sh" >&2; exit 1; }
@@ -279,13 +310,14 @@ fi
 install -d -m 755 "$EDH_APP_DIR"
 save_prev
 write_secrets
+# log in to the registry first: the Caddyfile check may pull a caddy image from it
+if [[ "${EDH_SKIP_PULL:-}" != 1 ]]; then
+  aws ecr get-login-password --region "$EDH_REGION" | docker login --username AWS --password-stdin "${IMAGE%%/*}" >/dev/null
+fi
 validate_release
 install_app_files
 
-if [[ "${EDH_SKIP_PULL:-}" != 1 ]]; then
-  aws ecr get-login-password --region "$EDH_REGION" | docker login --username AWS --password-stdin "${IMAGE%%/*}" >/dev/null
-  docker pull -q "$IMAGE" >/dev/null
-fi
+if [[ "${EDH_SKIP_PULL:-}" != 1 ]]; then docker pull -q "$IMAGE" >/dev/null; fi
 
 write_compose_env "${PREV:-$IMAGE}"
 if [[ "${EDH_USES_GOTENBERG:-false}" == true ]]; then services="$services gotenberg"; fi
@@ -303,11 +335,13 @@ fi
 if [[ -n "${EDH_MIGRATE_CMD:-}" ]]; then
   log "running migrations with $IMAGE"
   if ! migrate; then
-    # like every abort before the switch: the previous configuration back (env files, compose.yml, Caddyfile),
-    # and caddy/postgres re-upped with it; the old app version keeps serving
+    # like every abort before the switch: the previous configuration back (env files, compose.yml, Caddyfile,
+    # edh.env), and caddy/postgres re-upped with it; the old app version keeps serving
     log "migrations failed: restoring the previous configuration"
     # shellcheck disable=SC2086
     restore_prev $KEPT
+    restore_env_file
+    if [[ -z "$PREV" ]]; then abort_first_deploy "deploy failed" "Migrations failed for $IMAGE."; fi
     if ! revert_infra; then
       alert "SITE DOWN after deploy" "Migrations failed for $IMAGE, and with the previous configuration restored the app fails /health."
       done_exit 3

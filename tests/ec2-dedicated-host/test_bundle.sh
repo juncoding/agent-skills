@@ -3,7 +3,7 @@
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 export PATH="$TESTS_DIR/stubs:$PATH" STUB_LOG="$T/log"
 cd "$T" || exit 1
-bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.acme.com --emails a@x.com --migrate "npm run m" >/dev/null 2>&1
+bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.example.com --emails a@example.com --migrate "npm run m" >/dev/null 2>&1
 tgz=$(bash -c ". '$SKILL_DIR/scripts/lib.sh'; load_config; make_bundle abc123" 2>/dev/null)
 [[ -n "$tgz" && -f "$tgz" ]] && pass "make_bundle prints the path of the bundle" || { fail "make_bundle made no bundle"; finish; }
 list=$(tar tzf "$tgz")

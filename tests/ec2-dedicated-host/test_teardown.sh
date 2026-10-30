@@ -21,6 +21,8 @@ assert_not_contains "$log" " s3 rm" "deletes no S3 objects"
 assert_not_contains "$log" " s3 rb" "removes no bucket"
 assert_contains "$out" "kept" "explains what was kept"
 assert_contains "$out" "no longer expire" "explains that snapshots stop expiring"
+assert_contains "$out" "NEW public IP" "says a rebuilt server gets a new IP"
+assert_contains "$out" "update the DNS A record" "says the DNS record must be updated"
 # IAM: inline policies, the managed policy, profile, then the role
 for c in "delete-role-policy --role-name edh-acme-prod-host --policy-name edh-host" \
          "delete-role-policy --role-name edh-acme-prod-host --policy-name edh-cwagent" \
@@ -86,4 +88,22 @@ assert_status $rc 1 "wrong account: teardown refuses"
 assert_contains "$out" "but deploy.yml says 111111111111" "wrong account: teardown explains"
 assert_eq "$(grep -c 'STUB_READONLY refused' "$T/log")" "0" "wrong account: teardown makes no mutating call"
 assert_eq "$(grep -v 'sts get-caller-identity' "$T/log" | grep -c .)" "0" "wrong account: teardown makes no AWS call besides sts"
+# --keep-ip: the Elastic IP stays, so provision.sh reuses it (has_eip finds it by its tags)
+cp "$SKILL_DIR/assets/project/deploy.yml" deploy/deploy.yml
+: > "$T/log"
+out=$(td --keep-ip); rc=$?
+assert_status $rc 0 "teardown --keep-ip succeeds"
+assert_not_contains "$(cat "$T/log")" "release-address" "--keep-ip: the Elastic IP is not released"
+assert_contains "$(cat "$T/log")" "terminate-instances" "--keep-ip: the server is still terminated"
+assert_contains "$out" "203.0.113.10" "--keep-ip: names the kept IP"
+assert_contains "$out" "kept (--keep-ip)" "--keep-ip: says so"
+assert_contains "$out" "DNS needs no change" "--keep-ip: the kept-data message says DNS stays"
+assert_not_contains "$out" "NEW public IP" "--keep-ip: no new-IP warning"
+# a later provision finds the kept Elastic IP by its tags and reuses it (no new allocation)
+: > "$T/log"
+out=$(bash "$SKILL_DIR/scripts/provision.sh" 2>&1); rc=$?
+assert_contains "$out" "Elastic IP edh-acme-prod: exists" "provision after --keep-ip: the kept Elastic IP is reused"
+assert_not_contains "$(cat "$T/log")" "allocate-address" "provision after --keep-ip: no new IP allocated"
+out=$(td --bogus); rc=$?
+assert_status $rc 1 "teardown with an unknown option refuses"
 finish

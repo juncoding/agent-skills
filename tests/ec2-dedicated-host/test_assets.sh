@@ -114,8 +114,8 @@ assert_eq "$deny" "Deny ssm:GetParameter,ssm:GetParameterHistory,ssm:GetParamete
   "policy denies reading any SSM parameter outside /acme/prod (and public /aws/service)"
 assert_eq "$(printf '%s' "$pol" | python3 -I -c 'import json, sys
 s = [s for s in json.load(sys.stdin)["Statement"] if s.get("Sid") == "BackupsRead"][0]
-print(",".join(sorted(s["Action"])))' 2>&1)" "s3:GetObject,s3:GetObjectVersion,s3:ListBucket" \
-  "backups readable by version (restores fetch the exact version in the backup manifest)"
+print(",".join(sorted(s["Action"])), s["Resource"])' 2>&1)" "s3:GetObject,s3:GetObjectVersion arn:aws:s3:::edh-acme-prod-backups-123456789012/*" \
+  "backups readable by version (restores fetch the exact version in the backup manifest); no listing"
 assert_contains "$pol" "repository/edh/acme" "image pulls scoped to the client's ECR repo"
 assert_contains "$pol" "sns:ap-southeast-1:123456789012:edh-acme-prod-alerts" "alerts scoped to the client's topic"
 for f in backups-lifecycle.json uploads-lifecycle.json dlm-policy.json; do

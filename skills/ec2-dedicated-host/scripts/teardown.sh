@@ -1,18 +1,28 @@
 #!/usr/bin/env bash
-# teardown.sh — remove the SERVER and its plumbing. Data is always kept:
+# teardown.sh [--keep-ip] — remove the SERVER and its plumbing. Data is always kept:
 #   data volume, backup + uploads buckets, ECR images, SSM secrets and existing snapshots stay.
 #   Deleting them is a manual step (printed). This script never deletes a volume, bucket, ECR repo or parameter.
 # Removes: monitoring (if on), the server, its Elastic IP, security group, snapshot policy, IAM role + profile.
+#   --keep-ip  keep the Elastic IP (about $3.60/month unattached): a server rebuilt with provision.sh --apply gets
+#              the same public IP, so DNS needs no change. Without it a rebuilt server gets a NEW IP.
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$(dirname "$0")/lib.sh"
+KEEP_IP=0
+case "${1:-}" in "") ;; --keep-ip) KEEP_IP=1 ;; *) die "usage: teardown.sh [--keep-ip]" ;; esac
 load_config
 require_account
 ACCT=$(aws_account)
 ROLE="${EDH_PREFIX}-host"
 # the kept-data summary is printed however teardown ends (also after a failure half way)
 kept_message() {
-  local rc=$?
+  local rc=$? ipline
   trap - EXIT
+  if (( KEEP_IP )); then
+    ipline="  - the Elastic IP (--keep-ip): a rebuilt server gets the same public IP; DNS needs no change"
+  else
+    ipline="The Elastic IP was released: a rebuilt server gets a NEW public IP — update the DNS A record for $EDH_DOMAIN
+(provision.sh --apply prints the new IP; status.sh shows it)."
+  fi
   cat >&2 <<EOF
 
 Data kept (on purpose):
@@ -20,6 +30,7 @@ Data kept (on purpose):
   - its snapshots: with the snapshot policy gone they no longer expire on their own — delete them by hand when done
   - s3://${EDH_PREFIX}-backups-$ACCT  and  s3://${EDH_PREFIX}-uploads-$ACCT
   - ECR repo $EDH_ECR_REPO, SSM parameters under $EDH_SSM_PATH/
+$ipline
 Re-running provision.sh --apply reuses all of it. To delete data permanently, do it by hand in the console
 after taking a final backup — this skill never deletes resources tagged Protect=true.
 EOF
@@ -47,7 +58,7 @@ if [[ -n "$iid" ]]; then
 fi
 
 # whatever deploy.yml says now (monitoring may have been switched off since): remove uses exact names and is idempotent
-EDH_YES=1 "$(dirname "$0")/monitoring.sh" remove || warn "monitoring removal incomplete"
+EDH_YES=1 "$BASH" "$(dirname "$0")/monitoring.sh" remove || warn "monitoring removal incomplete"
 if [[ -n "$iid" ]]; then
   awsr ec2 modify-instance-attribute --instance-id "$iid" --no-disable-api-termination
   awsr ec2 terminate-instances --instance-ids "$iid" >/dev/null
@@ -57,7 +68,12 @@ fi
 eips=$(awsr ec2 describe-addresses --filters "Name=tag:edh:client,Values=$EDH_CLIENT" "Name=tag:edh:env,Values=$EDH_ENV" \
   --query 'Addresses[].[AllocationId,PublicIp]' --output text)
 for alloc in $(printf '%s\n' "$eips" | cut -f1); do
-  if [[ "$alloc" == eipalloc-* ]]; then awsr ec2 release-address --allocation-id "$alloc"; ok "Elastic IP $alloc released"; fi
+  [[ "$alloc" == eipalloc-* ]] || continue
+  if (( KEEP_IP )); then
+    ok "Elastic IP $alloc ($(printf '%s\n' "$eips" | awk -F'\t' -v a="$alloc" '$1 == a { print $2 }')) kept (--keep-ip): provision.sh --apply reuses it"
+  else
+    awsr ec2 release-address --allocation-id "$alloc"; ok "Elastic IP $alloc released"
+  fi
 done
 sg=$(awsr ec2 describe-security-groups --filters "Name=group-name,Values=$EDH_PREFIX" --query 'SecurityGroups[0].GroupId' --output text)
 if [[ -n "$sg" && "$sg" != None ]]; then

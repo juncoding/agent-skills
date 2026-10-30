@@ -47,7 +47,7 @@ case "${1:-}" in
     ok "now $new — set instance_type: $new in deploy/deploy.yml"
     # the alarms depend on the type (the CPU credit alarm exists only for t-family servers): monitoring.sh add
     # re-creates them, and deletes a stale credit alarm
-    if [[ "$EDH_MONITORING" == cloudwatch ]]; then "$(dirname "$0")/monitoring.sh" add; fi ;;
+    if [[ "$EDH_MONITORING" == cloudwatch ]]; then "$BASH" "$(dirname "$0")/monitoring.sh" add; fi ;;
   disk)
     gb="${2:-}"; [[ "$gb" =~ ^[0-9]+$ ]] || die "usage: resize.sh disk <GB>"
     gb=$((10#$gb))

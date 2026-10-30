@@ -20,8 +20,8 @@ ACCT=$(aws_account)
 require_instance
 BUCKET="${EDH_PREFIX}-backups-${ACCT}"
 
-# pick_backup <YYYY-MM-DD or ""> [exact-key] — (--unverified --key only, called with an exact key) choose a dump by its S3 upload time (LastModified), never by the
-# timestamp in its name: the server's role (and an app container using it) can upload any key under db/, e.g.
+# pick_backup <YYYY-MM-DD or ""> [exact-key] — (--unverified --key only, called with an exact key) choose a
+# dump by its S3 upload time (LastModified), never by the timestamp in its name: the server's role (and an app container using it) can upload any key under db/, e.g.
 # db/daily/app-29991231T000000Z.dump, which would win any sort by name. Skipped, with a warning naming them:
 # names dated more than 5 min in the future, and names more than 2 h from their upload time (uploads follow the
 # dump within minutes). The date filter applies to the upload date. Prints "key<TAB>LastModified<TAB>size".

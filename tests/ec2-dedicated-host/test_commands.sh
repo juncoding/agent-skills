@@ -12,7 +12,7 @@ export PATH="$T/bin:$TESTS_DIR/stubs:$PATH" STUB_LOG="$T/log" STUB_S3="$T/s3" ST
 BUCKET="edh-acme-prod-backups-123456789012"
 
 mkdir "$T/p"; cd "$T/p" || exit 1
-bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.acme.com --emails a@x.com --account-id 123456789012 >/dev/null 2>&1
+bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.example.com --emails a@example.com --account-id 123456789012 >/dev/null 2>&1
 git init -q -b main . && git add -A && git -c user.email=t@example.com -c user.name=t commit -qm init
 # env prod deploys only origin/main: a local bare repository stands in for GitHub
 git init -q --bare -b main "$T/origin.git" && git remote add origin "$T/origin.git" && git push -q origin main
@@ -71,7 +71,7 @@ out=$(run deploy.sh); rc=$?
 sha=$(git rev-parse --short=12 HEAD)
 img="123456789012.dkr.ecr.ap-southeast-1.amazonaws.com/edh/acme:$sha"
 assert_status $rc 0 "deploy succeeds"
-assert_contains "$out" "live: https://erp.acme.com ($sha)" "deploy reports the live site"
+assert_contains "$out" "live: https://erp.example.com ($sha)" "deploy reports the live site"
 assert_contains "$(cat "$T/log.docker")" "buildx build --platform linux/arm64 -f Dockerfile -t $img --push ." "deploy builds and pushes arm64"
 assert_eq "$(calls 'sts get-caller-identity')" "1" "deploy checks the account once"
 b="$T/s3/$BUCKET/_edh/bundles/$sha.tgz"
@@ -83,8 +83,9 @@ body=$(grep -o -- '--body [^ ]*' "$T/log" | cut -d' ' -f2)
 [[ -n "$body" && ! -e "$body" ]] && pass "local bundle removed" || fail "local bundle left behind: $body"
 s=$(script_n 1)
 assert_contains "$s" "bash \"\$R/host/edh-deploy.sh\" \"\$R\" $img" "remote runs edh-deploy.sh with the image"
-assert_contains "$s" "s3://$BUCKET/_edh/bundles/$sha.tgz" "remote fetches the bundle"
-assert_contains "$s" "tar xz --no-same-owner" "remote extracts without the Mac's file owners"
+assert_contains "$s" "s3api get-object --bucket $BUCKET --key _edh/bundles/$sha.tgz --expected-bucket-owner 123456789012" \
+  "remote fetches the bundle from this account's bucket only"
+assert_contains "$s" "--no-same-owner" "remote extracts without the Mac's file owners"
 assert_not_contains "$s" "with-decryption" "remote deploy command holds no secrets"
 : > "$T/log"
 out=$(run deploy.sh --maint); rc=$?
@@ -96,39 +97,68 @@ for c in "1:previous version is still serving" "2:rolled back to the previous ve
   assert_contains "$out" "${c#*:}" "edh-deploy exit ${c%%:*}: '${c#*:}'"
   assert_not_contains "$out" "live:" "edh-deploy exit ${c%%:*}: not reported live"
 done
+# compose_with <after-regex> <line>... — deploy/compose.yml with the lines inserted after the first match
+# (saved in $T/compose.save first); prints the line number of the first inserted line
+compose_with() {
+  local re="$1" n; shift
+  cp deploy/compose.yml "$T/compose.save"
+  n=$(grep -nE -m1 -- "$re" "$T/compose.save" | cut -d: -f1)
+  { head -n "$n" "$T/compose.save"; printf '%s\n' "$@"; tail -n +"$((n + 1))" "$T/compose.save"; } > deploy/compose.yml
+  echo $((n + 1))
+}
+VOL='/srv/maint:ro'                    # the last entry of caddy's volumes: list
+SVC='^    restart: unless-stopped'     # a key of the first service (caddy)
+# compose_refused <after-regex> <expected text> <line>... — deploy refuses, explains, names the line, ships nothing
+compose_refused() {
+  local re="$1" want="$2" n; shift 2
+  n=$(compose_with "$re" "$@")
+  : > "$T/log"; : > "$T/log.docker"
+  out=$(run deploy.sh --allow-dirty); rc=$?
+  assert_status $rc 1 "compose '$*' refused"
+  assert_contains "$out" "$want" "compose '$*': explained"
+  n=$((n + ${LINE_OFF:-0}))   # LINE_OFF: which inserted line is the offending one
+  assert_contains "$out" "line $n:" "compose '$*': names line $n of the file"
+  assert_eq "$(grep -c buildx "$T/log.docker")$(calls put-object)" "00" "compose '$*': nothing built or shipped"
+  cp "$T/compose.save" deploy/compose.yml
+}
 # no container may mount the backups directory (the backup manifest) or the whole data directory
 for m in '- /data:/hostdata' '- "/data/:/hostdata"' '- ${EDH_DATA_DIR:-/data}:/d' '- ${EDH_DATA_DIR:-/data}/backups:/b:ro' \
-         '- /data/backups:/b' 'source: /data' "source: '\${EDH_DATA_DIR:-/data}'"; do
-  cp deploy/compose.yml "$T/compose.save"
-  printf '      %s\n' "$m" >> deploy/compose.yml
-  : > "$T/log"; : > "$T/log.docker"
-  out=$(run deploy.sh --allow-dirty); rc=$?
-  assert_status $rc 1 "compose mount '$m' refused"
-  assert_contains "$out" "backup manifest" "compose mount '$m': explained"
-  assert_eq "$(grep -c buildx "$T/log.docker")$(calls put-object)" "00" "compose mount '$m': nothing built or shipped"
-  cp "$T/compose.save" deploy/compose.yml
+         '- /data/backups:/b' '- /data//backups/x:/b'; do
+  compose_refused "$VOL" "backup manifest" "      $m"
 done
-# no container may get at the server itself
-for m in '- /:/host' '- "/:/host:ro"' 'source: /' '- /var/run/docker.sock:/var/run/docker.sock' '- /run/docker.sock:/d.sock' \
-         '- ../secrets:/s' '- ${EDH_DATA_DIR:-/data}/caddy/../backups:/b' '- "..:/up"' 'privileged: true' 'privileged: "true"' \
-         'pid: host' 'network_mode: host' 'network_mode: "host"'; do
-  cp deploy/compose.yml "$T/compose.save"
-  printf '    %s\n' "$m" >> deploy/compose.yml
-  : > "$T/log"; : > "$T/log.docker"
-  out=$(run deploy.sh --allow-dirty); rc=$?
-  assert_status $rc 1 "compose '$m' refused"
-  assert_contains "$out" "access to the server itself" "compose '$m': explained"
-  assert_eq "$(grep -c buildx "$T/log.docker")$(calls put-object)" "00" "compose '$m': nothing built or shipped"
-  cp "$T/compose.save" deploy/compose.yml
+LINE_OFF=1 compose_refused "$VOL" "backup manifest" "      - type: bind" "        source: /data" "        target: /x"
+LINE_OFF=1 compose_refused "$VOL" "backup manifest" "      - type: bind" "        source: '\${EDH_DATA_DIR:-/data}'" "        target: /x"
+# bind mounts only from ./<dir>, /data/<dir> or ${EDH_DATA_DIR}/<dir>; nothing else that reaches the server
+for m in '- /:/host' '- "/:/host:ro"' '- /var/run/docker.sock:/var/run/docker.sock' '- /etc:/hostetc:ro' '- ~/x:/x' \
+         '- ${HOME}/x:/x' '- ./:/app' '- .:/app' '- ../secrets:/s' '- ${EDH_DATA_DIR:-/data}/caddy/../backups:/b' '- "..:/up"' \
+         '- { type: bind, source: /, target: /host }'; do
+  compose_refused "$VOL" "access to the server itself" "      $m"
 done
-# ordinary settings still pass
+LINE_OFF=1 compose_refused "$VOL" "access to the server itself" "      - type: bind" "        source: /" "        target: /host"
 cp deploy/compose.yml "$T/compose.save"
-printf '    %s\n' 'privileged: false' 'network_mode: bridge' '# - /var/run/docker.sock:/x (a comment)' \
-  '- "${EDH_DATA_DIR:-/data}/uploads:/uploads"' 'command: ["echo", "Loading..."]' >> deploy/compose.yml
-: > "$T/log"
+sed 's#^    volumes:$#    volumes: ["/:/host"]#' "$T/compose.save" > "$T/flow.yml"   # flow-style list (first service)
+awk 'NR == 1, /^    volumes:/' "$T/flow.yml" | grep -q '"/:/host"' && cp "$T/flow.yml" deploy/compose.yml
 out=$(run deploy.sh --allow-dirty); rc=$?
-assert_status $rc 0 "compose with ordinary settings (privileged: false, a data subdirectory, a comment) deploys"
+assert_status $rc 1 "compose: a flow-style volumes list is checked too"
 cp "$T/compose.save" deploy/compose.yml
+for k in 'privileged: true' 'privileged: "true"' 'pid: host' 'ipc: host' 'userns_mode: host' 'network_mode: host' \
+         'network_mode: "host"' 'cap_add: [SYS_ADMIN]' 'devices: ["/dev/sda:/dev/sda"]'; do
+  compose_refused "$SVC" "access to the server itself" "    $k"
+done
+compose_refused "$SVC" "access to the server itself" "    cap_add:" "      - NET_ADMIN"
+# ordinary settings still pass, and comment lines are ignored
+n=$(compose_with "$VOL" '      - "${EDH_DATA_DIR:-/data}/uploads:/uploads"' '      - ./extra:/extra:ro' '      - appdata:/var/lib/x' \
+  '      - /tmp/anonymous' '      # - /var/run/docker.sock:/x (a comment)')
+cp deploy/compose.yml "$T/c2" && { head -n 12 "$T/c2"; printf '%s\n' '    privileged: false' '    network_mode: bridge' \
+  '    command: ["echo", "Loading..."]'; tail -n +13 "$T/c2"; } > deploy/compose.yml
+: > "$T/log"
+out=$(EDH_YES=1 run deploy.sh --allow-dirty --allow-non-main); rc=$?   # prod + dirty tree: emergency flags
+[[ $rc == 0 ]] || printf '%s\n' "$out" | grep -A5 ERROR
+assert_status $rc 0 "compose with ordinary settings (data subdirectory, ./dir, named and anonymous volumes, a comment) deploys"
+cp "$T/compose.save" deploy/compose.yml
+rm -f "$T/c2" "$T/flow.yml"
+out=$(run deploy.sh); rc=$?
+assert_status $rc 0 "the scaffolded compose.yml passes the lint"
 assert_eq "$(git status --porcelain)" "" "compose.yml restored after the mount tests"
 touch untracked
 out=$(run deploy.sh); rc=$?
@@ -229,10 +259,14 @@ assert_eq "$(calls 'ssm send-command')" "0" "rollback without consent sends noth
 out=$(run backup.sh now); rc=$?
 assert_status $rc 0 "backup now succeeds"
 assert_contains "$(script_n 1)" "/opt/edh/bin/edh-backup.sh --tag manual --force" "backup now runs a manual backup"
-mkdir -p "$T/s3/$BUCKET/db/hourly" "$T/s3/$BUCKET/db/daily"
-touch "$T/s3/$BUCKET/db/hourly/app-20261030T010000Z.dump" "$T/s3/$BUCKET/db/daily/app-20261029T180000Z.dump"
-out=$(run backup.sh list); rc=$?
+printf 'db/hourly/app-20261030T010000Z.dump\t2026-10-30T01:00:05+00:00\t10\ndb/daily/app-20261029T180000Z.dump\t2026-10-29T18:00:09+00:00\t9\n' > "$T/list.tsv"
+: > "$T/log"
+out=$(STUB_S3_LIST="$T/list.tsv" run backup.sh list); rc=$?
+assert_status $rc 0 "backup list succeeds"
 assert_contains "$out" "db/hourly/app-20261030T010000Z.dump" "backup list shows the backups"
+assert_contains "$(grep list-objects-v2 "$T/log")" "--expected-bucket-owner 123456789012" "backup list reads only this account's bucket"
+out=$(run backup.sh list); rc=$?
+assert_status $rc 0 "backup list of an empty bucket succeeds"
 
 # ============ restore db: backups are chosen by S3 upload time (LastModified), never by the name's timestamp —
 # the host role (and an app container using it) can upload any key under db/, e.g. app-29991231T000000Z.dump
@@ -495,7 +529,7 @@ assert_eq "$(grep -cE 'create-snapshot|send-command' "$T/log")" "0" "upgrade wit
 # ============ status (read-only)
 : > "$T/log"
 out=$(FAKE_CURL_RC=7 run status.sh); rc=$?
-assert_contains "$out" "site:    https://erp.acme.com/health → unreachable" "status: an unreachable site is just 'unreachable'"
+assert_contains "$out" "site:    https://erp.example.com/health → unreachable" "status: an unreachable site is just 'unreachable'"
 assert_not_contains "$out" "000 in" "status: no curl noise for an unreachable site"
 : > "$T/log"
 out=$(run status.sh); rc=$?
