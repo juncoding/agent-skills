@@ -58,13 +58,24 @@ oplog() {
   who=$(git config user.name 2>/dev/null || true)
   who="${who:-${USER:-unknown}}"
   line="- $(date -u '+%Y-%m-%d %H:%M') UTC · $cmd · $res${detail:+ · $detail} · $who"
-  line=$(printf '%s' "$line" | tr '\r\n\t' '   ')
-  oplog_write "$line" 2>/dev/null || warn "could not write the operations log deploy/OPERATIONS.md"
+  # one action, one line: newlines, CR and tabs become spaces, every other control character goes (bytes, so UTF-8
+  # text such as "·" is untouched)
+  line=$(printf '%s' "$line" | LC_ALL=C tr '\r\n\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  local rc=0
+  oplog_write "$line" 2>/dev/null || rc=$?
+  case "$rc" in
+    0) ;;
+    3) warn "deploy/ or deploy/OPERATIONS.md is a symlink or not a regular file — not writing the operations log through it" ;;
+    *) warn "could not write the operations log deploy/OPERATIONS.md" ;;
+  esac
   return 0
 }
+# oplog_write <line> — 0 written · 3 refused (deploy/ or the log is a symlink or not a regular file) · else failed
 oplog_write() {
   local f=deploy/OPERATIONS.md last
-  [[ -d deploy && ! -d "$f" ]] || return 1
+  if [[ -L deploy || -L "$f" ]]; then return 3; fi
+  [[ -d deploy ]] || return 1
+  if [[ -e "$f" && ! -f "$f" ]]; then return 3; fi
   if [[ ! -f "$f" ]]; then cp "$EDH_SKILL_DIR/assets/project/OPERATIONS.md" "$f" || return 1; fi
   if ! grep -q '^## Log' "$f"; then printf '\n## Log\n' >> "$f" || return 1; fi
   if [[ -n "$(tail -c 1 "$f")" ]]; then printf '\n' >> "$f" || return 1; fi

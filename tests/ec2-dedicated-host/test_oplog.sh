@@ -82,6 +82,44 @@ tok=$(cat "$T/log.params/_acme_prod__edh_maint-bypass" 2>/dev/null)
 [[ -n "$tok" ]] && assert_not_contains "$(cat "$OPS")" "$tok" "the new bypass token never reaches OPERATIONS.md" || fail "no rotated token to check"
 assert_not_contains "$(cat "$OPS")" "maint_bypass=" "no bypass link in OPERATIONS.md"
 
+# ============ a rejected secrets name is never echoed or logged (a value pasted as the name)
+n=$(lines)
+out=$(printf 'x' | run secrets.sh set Sk_Live_SECRETVALUE123); rc=$?
+assert_status $rc 1 "secrets set with an invalid name: refused"
+assert_not_contains "$out" "SECRETVALUE123" "an invalid name is not echoed on stdout/stderr"
+assert_not_contains "$(cat "$OPS")" "SECRETVALUE123" "an invalid name never reaches OPERATIONS.md"
+assert_eq "$(lines)" "$((n + 1))" "an invalid name: one line logged"
+assert_contains "$(last)" "· secrets · refused · set <invalid name>" "an invalid name is logged as <invalid name>"
+out=$(EDH_YES=1 run secrets.sh delete 'Sk_Live_SECRETVALUE123'); rc=$?
+assert_not_contains "$out$(cat "$OPS")" "SECRETVALUE123" "delete with an invalid name: not echoed or logged"
+assert_contains "$(last)" "· secrets · refused · delete <invalid name>" "delete with an invalid name is logged as <invalid name>"
+
+# ============ one action is exactly one line: control characters in any field are dropped
+git commit -q --allow-empty -m "$(printf 'Fix\r\033[31m red\001\nsecond line')" && git push -q origin main
+before=$(wc -l < "$OPS")
+run deploy.sh >/dev/null
+assert_eq "$(( $(wc -l < "$OPS") - before ))" "1" "a commit subject with CR, ESC and a newline adds exactly one line"
+assert_eq "$(printf '%s' "$(last)" | LC_ALL=C tr -d '\040-\176\200-\377' | wc -c | tr -d ' ')" "0" "the line has no control characters"
+assert_contains "$(last)" "Fix [31m red" "the subject is kept, minus its control characters"
+EDH_YES=1 run maint.sh on --message "$(printf 'two\nlines\rhere')" --no-link >/dev/null
+assert_contains "$(last)" '"two lines here"' "a maintenance message with newline and CR stays on one line"
+EDH_YES=1 run maint.sh off >/dev/null
+
+# ============ the log is a regular file in a real directory: never written through a symlink
+printf 'outside\n' > "$T/elsewhere.md"
+mv "$OPS" "$T/ops.keep"; ln -s "$T/elsewhere.md" "$OPS"
+out=$(EDH_YES=1 run maint.sh off); rc=$?
+assert_status $rc 0 "a symlinked OPERATIONS.md doesn't fail the command"
+assert_eq "$(cat "$T/elsewhere.md")" "outside" "a symlinked OPERATIONS.md is not written through"
+assert_eq "$(printf '%s\n' "$out" | grep -c 'symlink')" "1" "a symlinked OPERATIONS.md: a single warning"
+rm -f "$OPS"; mv "$T/ops.keep" "$OPS"
+mv deploy "$T/realdeploy"; ln -s "$T/realdeploy" deploy
+n=$(grep -c '^- ' "$T/realdeploy/OPERATIONS.md")
+out=$(EDH_YES=1 run maint.sh off); rc=$?
+assert_eq "$(grep -c '^- ' "$T/realdeploy/OPERATIONS.md")" "$n" "a symlinked deploy/ directory: the log is not written"
+assert_contains "$out" "symlink" "a symlinked deploy/ directory: warned"
+rm -f deploy; mv "$T/realdeploy" deploy
+
 # ============ an older project without OPERATIONS.md: created with the skeleton on the first logged command
 rm -f "$OPS"
 logged "older project" "· maint · ok · off" maint.sh off
@@ -92,8 +130,13 @@ assert_contains "$(cat "$OPS")" "## Log" "older project: with a Log section"
 rm -f "$OPS"; mkdir "$OPS"
 out=$(run maint.sh off); rc=$?
 assert_status $rc 0 "an unwritable OPERATIONS.md doesn't fail the command"
-assert_contains "$out" "could not write" "an unwritable OPERATIONS.md: warned"
+assert_contains "$out" "not a regular file" "an OPERATIONS.md that isn't a regular file: warned"
 rmdir "$OPS"
+cp "$SKILL_DIR/assets/project/OPERATIONS.md" "$OPS"; chmod 444 "$OPS"
+out=$(run maint.sh off); rc=$?
+assert_status $rc 0 "a read-only OPERATIONS.md doesn't fail the command"
+assert_contains "$out" "could not write" "a read-only OPERATIONS.md: warned"
+chmod 644 "$OPS"
 # the skill never commits or pushes it
 assert_eq "$(git log --format=%s -- "$OPS" | grep -vc '^Add PDF export$')" "0" "OPERATIONS.md is never committed by the skill"
 finish

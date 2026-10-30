@@ -68,7 +68,7 @@ Run from the **project root** (the directory holding `deploy/`): `bash <this-ski
 | "restore" | `restore.sh db --latest\|--date YYYY-MM-DD\|--key db/… [--check]` | `--check` = side database, live data untouched. Without it: replaces live DB (asks first). `--unverified` only with `--key`. |
 | "restore the disk" | `restore.sh disk --snapshot snap-…` | app offline minutes; `--foreign-snapshot` for an untagged snapshot. Asks first. |
 | "status" | `status.sh` | read-only: server, DNS, site, firing alarms, containers, backups, disk, memory |
-| "set a secret" | the user runs `! pbpaste \| bash <this-skill>/scripts/secrets.sh set NAME` · `secrets.sh list` · `secrets.sh delete NAME` | value via the prompt/stdin only, never in chat or argv; redeploy to apply |
+| "set a secret" | the user runs `! pbpaste \| bash <this-skill>/scripts/secrets.sh set NAME` · `secrets.sh list` · `secrets.sh delete NAME` | value via the prompt/stdin only, never in chat or argv. The NAME is stored and logged in plain text — never pass a value as the name. Redeploy to apply |
 | "monitoring" | `monitoring.sh add` / `remove` / `status` | email alerts via SNS; `remove` asks first |
 | "resize" | `resize.sh instance t4g.large` / `resize.sh disk 40` | instance: 3–5 min offline; disk: online, grow only. Ask first. |
 | "upgrade the OS" | `upgrade.sh os [--reboot]` | snapshot first; reboots only with `--reboot`. Ask first. |

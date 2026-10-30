@@ -26,8 +26,10 @@ while [[ $# -gt 0 ]]; do
   shift 2
 done
 A="$EDH_SKILL_DIR/assets/project"
+# never write through a symlink (a dangling one included)
+[[ ! -L deploy ]] || die "deploy is a symlink — refusing to write through it"
 for f in deploy.yml compose.yml Caddyfile maint/maintenance.html maint/down.html OPERATIONS.md; do
-  [[ ! -e "deploy/$f" ]] || die "deploy/$f already exists — edit it instead"
+  [[ ! -e "deploy/$f" && ! -L "deploy/$f" ]] || die "deploy/$f already exists — edit it instead"
 done
 
 # esc <value> — safe as sed replacement text with # as the delimiter

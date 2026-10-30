@@ -2673,6 +2673,9 @@ Run this in a scratch project with the fixture app, plus a tiny Postgres-backed 
 26. The `memory.peak` cgroup path (`/sys/fs/cgroup/system.slice/docker-<id>.scope/memory.peak`) on Ubuntu 24.04.
 27. Where `maint.sh on` writes the bypass link when no TTY is available (agent sessions).
 28. Restoring a missing or expired backup key: under the new policy (no ListBucket) S3 returns AccessDenied (403), not 404. Check the operator sees a clear "could not download" message.
+29. The server-side compose check under `env -i` with Ubuntu's Compose: does `config --variables` work, or does it fall back to the raw-file scan? The default compose.yml must pass with the real .env.
+30. On the second deploy, the `--mount-root` ownership checks pass for /data/caddy, /data/maint, /data/postgres and /opt/edh/app/caddy.
+31. OPERATIONS.md gets exactly one line per command on real runs, including a failed and a rolled-back deploy.
 
 Record findings in the design doc under "Validation results". Fix any bugs with a failing test first, then the fix.
 

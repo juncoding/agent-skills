@@ -9,6 +9,9 @@ operator's Mac and pushes `…/edh/<client>:<12-char git sha>` to ECR. `dockerfi
 and `build_context` (default `.`) are set in `deploy.yml`. The image must contain `sh` (migrations run
 through `sh -c`). Native modules must build for arm64.
 
+The build context is the project, which now also holds `deploy/OPERATIONS.md` (the operations log). Add
+`deploy/OPERATIONS.md` (or all of `deploy/`) to `.dockerignore` if you don't want it copied into the image.
+
 ## 2. Listens on `$PORT`
 
 Compose sets `PORT=<app_port>` (default 3000). Caddy proxies `app:<app_port>`. Don't publish ports
@@ -84,6 +87,10 @@ instance metadata — **no access keys**: the AWS SDK default credential chain f
 region and bucket from `AWS_REGION` and `EDH_UPLOADS_BUCKET` (see 4). With `false`, containers can't reach
 the role. Gotenberg (if `uses_gotenberg: true`) is at `GOTENBERG_URL` (`http://gotenberg:3000`) inside the
 Compose network.
+
+Bind-mounted directories are not a place for user files: on the server every `/data/<dir>` bind source must
+be a root-owned real directory (checked at each deploy, see 8), and they are not backed up by the database
+dumps. Write user files to the S3 uploads bucket.
 
 ## 6. Migrations: `migrate_cmd`, backward compatible
 

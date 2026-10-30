@@ -33,6 +33,16 @@ out=$(bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.example.com -
 assert_status $rc 1 "init refuses when deploy/OPERATIONS.md exists"
 assert_eq "$(cat deploy/OPERATIONS.md)" "keep me" "init leaves an existing OPERATIONS.md alone"
 
+# symlinks: a symlinked deploy/ or deploy/OPERATIONS.md (even a dangling one) is refused
+mkdir -p "$T/sym1/real"; cd "$T/sym1" || exit 1; ln -s real deploy
+out=$(bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.example.com --emails a@example.com 2>&1); rc=$?
+assert_status $rc 1 "init refuses a symlinked deploy/"
+assert_eq "$(ls real | wc -l | tr -d ' ')" "0" "init writes nothing through a symlinked deploy/"
+mkdir -p "$T/sym2/deploy"; cd "$T/sym2" || exit 1; ln -s "$T/nowhere.md" deploy/OPERATIONS.md
+out=$(bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.example.com --emails a@example.com 2>&1); rc=$?
+assert_status $rc 1 "init refuses a (dangling) symlinked deploy/OPERATIONS.md"
+[[ ! -e "$T/nowhere.md" ]] && pass "init writes nothing through the symlink" || fail "init wrote through the symlink"
+
 # --account-id
 mkdir "$T/b"; cd "$T/b" || exit 1
 bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.example.com --emails a@example.com --account-id 123456789012 \

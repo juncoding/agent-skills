@@ -3,17 +3,26 @@
 # secrets.sh list            names only
 # secrets.sh delete <name>
 # <name>: lowercase-with-dashes; becomes NAME_WITH_UNDERSCORES in the app's environment. Redeploy to apply.
+#   The NAME is stored and logged in plain text (deploy/OPERATIONS.md) — never pass a value as the name. A rejected
+#   name is neither echoed nor logged (logged as "<invalid name>").
 # Values never appear on a command line: they go to AWS through a 0600 temp file (--value file://).
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$(dirname "$0")/lib.sh"
 load_config
 cmd="${1:-}"
-case "$cmd" in set|delete) oplog_begin secrets "$cmd ${2:-}"; require_account ;; esac   # list is read-only; the log gets the NAME only
-
-# check_name <name> — also keeps the reserved _edh/ parameters out of reach
+# valid_name <name> — lowercase letters/digits/dashes; also keeps the reserved _edh/ parameters out of reach
+valid_name() { [[ "${1:-}" =~ ^[a-z0-9][a-z0-9-]*$ ]]; }
+# check_name <name> — the name is checked BEFORE anything is logged, and a rejected one is never echoed: it might
+# be a value pasted in the wrong place
 check_name() {
-  [[ "${1:-}" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "name must be lowercase letters/digits/dashes (got '${1:-}')"
+  valid_name "${1:-}" || refuse "the name must be lowercase letters, digits and dashes (it is stored and logged in plain text — never pass a value as the name)"
 }
+case "$cmd" in
+  set|delete)   # list is read-only; the log gets the NAME only
+    if valid_name "${2:-}"; then oplog_begin secrets "$cmd $2"; else oplog_begin secrets "$cmd <invalid name>"; fi
+    check_name "${2:-}"
+    require_account ;;
+esac
 
 case "$cmd" in
   set)
