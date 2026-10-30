@@ -177,6 +177,20 @@ require_instance() {
   [[ "$EDH_IID" != *[[:space:]]* ]] || die "more than one server tagged $EDH_NAME: $EDH_IID"
 }
 
+# find_data_volume — EDH_VOL_ID / EDH_VOL_AZ of this client's one data volume (tag edh:role=data); dies on
+# none or more than one.
+# shellcheck disable=SC2034  # EDH_VOL_* are read by the scripts that call this
+find_data_volume() {
+  local out
+  out=$(awsr ec2 describe-volumes --filters "Name=tag:edh:client,Values=$EDH_CLIENT" "Name=tag:edh:env,Values=$EDH_ENV" \
+    "Name=tag:edh:role,Values=data" --query 'Volumes[].[VolumeId,AvailabilityZone]' --output text) || die "cannot list volumes"
+  out=$(printf '%s\n' "$out" | grep -v -e '^None$' -e '^$' || true)
+  [[ -n "$out" ]] || die "no data volume tagged $EDH_NAME"
+  [[ "$out" != *$'\n'* ]] || die "more than one data volume tagged $EDH_NAME: $(printf '%s' "$out" | cut -f1 | tr '\n' ' ')"
+  EDH_VOL_ID=$(printf '%s' "$out" | cut -f1); EDH_VOL_AZ=$(printf '%s' "$out" | cut -f2)
+  [[ "$EDH_VOL_ID" =~ ^vol-[0-9a-z]+$ ]] || die "unexpected volume id: '$EDH_VOL_ID'"
+}
+
 # ssm_run <instance-id> <timeout-seconds> <script> — run a bash script on the server as root.
 # The script travels base64-encoded, so no quoting issues. Prints its output; returns its exit code,
 # or 124 if the command hasn't finished by timeout + 120 s.

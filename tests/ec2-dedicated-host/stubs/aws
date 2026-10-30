@@ -160,15 +160,19 @@ PY
         describe-instances)
           case "$*" in
             *HttpPutResponseHopLimit*) echo "${STUB_HOP:-2}" ;;
+            # STUB_DOT_VOLUMES: volumes the server deletes when it is terminated (DeleteOnTermination=true)
+            *BlockDeviceMappings*) echo "${STUB_DOT_VOLUMES:-vol-root}" ;;
             *"[InstanceType,"*) printf 't4g.medium\tap-southeast-1a\n' ;;
             *InstanceType*) echo "${STUB_ITYPE:-t4g.medium}" ;;   # STUB_ITYPE: the server's instance type
             *) echo i-stub ;;
           esac ;;
         describe-instance-information) echo Online ;;
+        describe-volumes-modifications) echo optimizing ;;
         describe-volumes)   # STUB_NO_VOLUME=1: no data volume; STUB_MULTI=volume: two of them
           # STUB_VOL_ATTACHED: the instance a volume is attached to (default None)
           case "$*" in
             *"Attachments[0].InstanceId"*) echo "${STUB_VOL_ATTACHED:-None}" ;;
+            *"VolumeId,Size"*) printf 'vol-stub\t%s\n' "${STUB_VOL_SIZE:-20}" ;;
             *"Volumes[]."*)
               if [[ -n "${STUB_NO_VOLUME:-}" ]]; then :
               elif [[ "${STUB_MULTI:-}" == volume ]]; then printf 'vol-stub\tap-southeast-1a\nvol-stub2\tap-southeast-1a\n'

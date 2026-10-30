@@ -97,12 +97,8 @@ case "${1:-}" in
   disk)
     [[ "${2:-}" == --snapshot && "${3:-}" =~ ^snap-[0-9a-f]+$ ]] || die "usage: restore.sh disk --snapshot snap-..."
     snap="$3"
-    old=$(awsr ec2 describe-volumes --filters "Name=tag:edh:client,Values=$EDH_CLIENT" "Name=tag:edh:env,Values=$EDH_ENV" \
-      "Name=tag:edh:role,Values=data" --query 'Volumes[].[VolumeId,AvailabilityZone]' --output text) || die "cannot list volumes"
-    old=$(printf '%s\n' "$old" | grep -v -e '^None$' -e '^$' || true)
-    [[ -n "$old" ]] || die "no data volume tagged $EDH_NAME"
-    [[ "$old" != *$'\n'* ]] || die "more than one data volume tagged $EDH_NAME: $(printf '%s' "$old" | cut -f1 | tr '\n' ' ')"
-    old_id=$(printf '%s' "$old" | cut -f1); az=$(printf '%s' "$old" | cut -f2)
+    find_data_volume
+    old_id="$EDH_VOL_ID"; az="$EDH_VOL_AZ"
     att=$(awsr ec2 describe-volumes --volume-ids "$old_id" --query 'Volumes[0].Attachments[0].InstanceId' --output text)
     [[ "$att" == "$EDH_IID" ]] || die "data volume $old_id is not attached to $EDH_IID (attached to: $att) — refusing"
     confirm "Replace data volume $old_id with a new volume from $snap? (app offline a few minutes; old volume kept)"

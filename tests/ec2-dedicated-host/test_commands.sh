@@ -52,6 +52,12 @@ rollback.sh
 backup.sh now
 restore.sh db --latest
 restore.sh disk --snapshot snap-0123abcd
+monitoring.sh add
+monitoring.sh remove
+resize.sh instance m7g.large
+resize.sh disk 40
+upgrade.sh os
+teardown.sh
 EOF
 cd "$T/p" || exit 1
 
@@ -247,6 +253,47 @@ assert_status $rc 1 "restore disk: unmount fails: stops"
 assert_contains "$out" "nothing was swapped" "restore disk: unmount fails: explained"
 assert_eq "$(calls detach-volume)" "0" "restore disk: unmount fails: old volume stays attached"
 assert_contains "$(script_n 2)" "systemctl start docker" "restore disk: unmount fails: the app is started again"
+
+# ============ resize
+: > "$T/log"
+out=$(STUB_ARCH=x86_64 STUB_READONLY=1 EDH_YES=1 run resize.sh instance c7i.large); rc=$?
+assert_status $rc 1 "resize to a non-arm64 type refused"
+assert_contains "$out" "does not support arm64" "resize to a non-arm64 type: explained"
+assert_eq "$(grep -c 'STUB_READONLY refused' "$T/log")" "0" "resize to a non-arm64 type: nothing changed"
+out=$(STUB_READONLY=1 EDH_YES=1 run resize.sh instance t4g.medium); rc=$?
+assert_contains "$out" "already t4g.medium" "resize to the current type refused"
+: > "$T/log"
+out=$(EDH_YES=1 run resize.sh instance m7g.large); rc=$?
+assert_status $rc 0 "resize instance succeeds"
+assert_eq "$(( $(line_of stop-instances) < $(line_of 'modify-instance-attribute') && $(line_of 'modify-instance-attribute') < $(line_of start-instances) ))" "1" \
+  "resize: stop, change type, start"
+assert_contains "$(grep modify-instance-attribute "$T/log")" "--instance-type Value=m7g.large" "resize sets the new type"
+assert_contains "$(scripts)" "docker compose up -d && wait_health 60" "resize brings the app up and checks health"
+assert_contains "$(cat "$T/log")" "put-metric-alarm" "resize re-runs monitoring.sh add (monitoring: cloudwatch)"
+sed 's/^monitoring: .*/monitoring: none/' deploy/deploy.yml > "$T/nomon.yml"; cp deploy/deploy.yml "$T/mon.yml"; cp "$T/nomon.yml" deploy/deploy.yml
+: > "$T/log"
+out=$(EDH_YES=1 run resize.sh instance m7g.large); rc=$?
+assert_eq "$(calls put-metric-alarm)" "0" "resize without monitoring: no alarms touched"
+cp "$T/mon.yml" deploy/deploy.yml
+: > "$T/log"
+out=$(STUB_VOL_SIZE=20 STUB_READONLY=1 EDH_YES=1 run resize.sh disk 10); rc=$?
+assert_status $rc 1 "resize disk smaller refused"
+assert_contains "$out" "must be larger than the current 20 GB" "resize disk smaller: explained"
+: > "$T/log"
+out=$(STUB_VOL_SIZE=20 EDH_YES=1 run resize.sh disk 40); rc=$?
+assert_status $rc 0 "resize disk succeeds"
+assert_contains "$(cat "$T/log")" "modify-volume --volume-id vol-stub --size 40" "resize disk grows the volume"
+assert_contains "$(script_n 1)" "resize2fs /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_volstub" "resize disk grows the filesystem"
+
+# ============ upgrade: safety snapshot before any package changes
+: > "$T/log"
+out=$(EDH_YES=1 run upgrade.sh os); rc=$?
+assert_status $rc 0 "upgrade os succeeds"
+assert_eq "$(( $(line_of 'create-snapshot --volume-id vol-stub') < $(line_of 'ssm send-command') ))" "1" "upgrade: safety snapshot first"
+assert_contains "$(script_n 1)" "apt-get -o DPkg::Lock::Timeout=600" "upgrade waits for the dpkg lock"
+: > "$T/log"
+out=$(run upgrade.sh os </dev/null); rc=$?
+assert_eq "$(grep -cE 'create-snapshot|send-command' "$T/log")" "0" "upgrade without consent changes nothing"
 
 # ============ status (read-only)
 : > "$T/log"
