@@ -2,7 +2,9 @@
 Description=edh database backup (pg_dump to S3)
 After=docker.service
 Requires=docker.service
+RequiresMountsFor=/data
 
 [Service]
 Type=oneshot
+TimeoutStartSec=2h
 ExecStart=/opt/edh/bin/edh-backup.sh

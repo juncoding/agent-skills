@@ -14,8 +14,42 @@ assert_contains "$out" "install -d -m 755 /data/caddy /data/maint" "bootstrap: /
 assert_contains "$out" "docker compose version --short" "bootstrap checks the compose version"
 assert_contains "$out" "2.30" "bootstrap requires compose >= 2.30"
 for p in python3 util-linux coreutils curl; do assert_contains "$out" " $p" "bootstrap installs $p"; done
-# the compose version check on its own, with a fake `docker` reporting each version
+# I4: format only a blank device (blkid -p rc 2 AND first 1 MiB all zeros); refuse anything else
+assert_contains "$out" 'blkid -p "$DEV"' "bootstrap probes the device with blkid -p"
+assert_contains "$out" "head -c 1048576" "bootstrap checks the first 1 MiB is zeros"
+assert_contains "$out" "refusing to format" "bootstrap refuses a device that isn't blank"
+assert_not_contains "$out" "|| mkfs" "no bare '|| mkfs'"
+# I5: docker (and the backup/drill units) never start without /data
+assert_contains "$out" "/etc/systemd/system/docker.service.d/edh-data.conf" "bootstrap adds a docker drop-in"
+assert_contains "$out" "RequiresMountsFor=/data" "docker requires the /data mount"
+assert_contains "$out" "systemctl daemon-reload" "bootstrap reloads systemd after the drop-in"
+for u in edh-backup.service edh-drill.service; do
+  assert_contains "$(cat "$SKILL_DIR/assets/host/systemd/$u")" "RequiresMountsFor=/data" "$u requires the /data mount"
+  assert_contains "$(cat "$SKILL_DIR/assets/host/systemd/$u")" "TimeoutStartSec=2h" "$u has a 2 h start timeout"
+done
+# I6: first-boot races and failure marker
+assert_eq "$(printf '%s\n' "$out" | grep -c 'apt-get -o DPkg::Lock::Timeout=600')" "2" "both apt-get calls wait for the dpkg lock"
+assert_eq "$(printf '%s\n' "$out" | grep -n -e 'snap wait system seed.loaded' -e 'snap install' | cut -d: -f2- | head -1)" \
+  "snap wait system seed.loaded" "snap waits for seeding before installing"
+assert_contains "$out" "/var/lib/edh/bootstrap-failed" "a failed bootstrap leaves a marker"
+assert_not_contains "$out" "fallocate -l 1G /swapfile &&" "swap setup is not an && chain"
+
+# the format check itself, with fake blkid / mkfs.ext4 and a file as the device
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+fmt=$(sed -n '/^rc=0; blkid -p/,/^fi$/p' "$SKILL_DIR/assets/host/bootstrap.sh")
+printf '#!/bin/sh\nexit ${FAKE_BLKID_RC:-0}\n' > "$T/blkid"; printf '#!/bin/sh\necho "mkfs $*" >> "%s/mkfs.log"\n' "$T" > "$T/mkfs.ext4"
+chmod +x "$T/blkid" "$T/mkfs.ext4"
+head -c 2097152 /dev/zero > "$T/blank"; { head -c 4096 /dev/zero; printf 'x'; } > "$T/dirty"
+for c in 2:blank:0:mkfs 2:dirty:1:- 0:dirty:0:- 4:blank:1:- 8:blank:1:-; do
+  IFS=: read -r brc dev want mk <<< "$c"
+  rm -f "$T/mkfs.log"
+  o=$(PATH="$T:$PATH" FAKE_BLKID_RC=$brc DEV="$T/$dev" bash -c "set -euo pipefail; $fmt" 2>&1); r=$?
+  got=$([[ -f "$T/mkfs.log" ]] && echo mkfs || echo -)
+  assert_eq "$r $got" "$want $mk" "format check: blkid rc $brc on a $dev device -> exit $want, mkfs: $mk"
+done
+assert_contains "$o" "refusing to format" "format check explains a refusal"
+
+# the compose version check on its own, with a fake `docker` reporting each version
 chk=$(sed -n '/^need=/,/^fi$/p' "$SKILL_DIR/assets/host/bootstrap.sh")
 for v in 2.40.3:0 2.30.0:0 v2.31.1:0 2.29.7:1 2.9.0:1 1.29.2:1; do
   printf '#!/bin/sh\necho %s\n' "${v%:*}" > "$T/docker"; chmod +x "$T/docker"
@@ -71,7 +105,24 @@ for f in backups-lifecycle.json uploads-lifecycle.json dlm-policy.json; do
   assert_not_contains "$out" "__" "no unrendered placeholders in $f"
 done
 assert_contains "$(render dlm-policy.json)" '"Value": "acme-prod"' "DLM targets this client's data volume"
-assert_not_contains "$(render uploads-lifecycle.json)" '"Expiration"' "uploads: current versions never expire"
+# I9: lifecycle under versioning: noncurrent versions expire per prefix; expired delete markers are removed
+lc=$(render backups-lifecycle.json | python3 -I -c 'import json, sys
+rules = json.load(sys.stdin)["Rules"]
+out = []
+for r in rules:
+    p = r["Filter"]["Prefix"]
+    e = r.get("Expiration", {})
+    if "Days" in e and "ExpiredObjectDeleteMarker" in e: out.append("BAD:" + r["ID"])
+    out.append("%s=%s%s" % (p or "*", r.get("NoncurrentVersionExpiration", {}).get("NoncurrentDays", "-"),
+                            "+dm" if e.get("ExpiredObjectDeleteMarker") else ""))
+print(" ".join(out))' 2>&1)
+assert_eq "$lc" "db/hourly/=1 db/daily/=7 db/monthly/=30 db/safety/=7 _edh/bundles/=1 *=30+dm" \
+  "backups lifecycle: noncurrent days per prefix, delete markers cleaned, no Days+DeleteMarker rule"
+lc=$(render uploads-lifecycle.json | python3 -I -c 'import json, sys
+r = json.load(sys.stdin)["Rules"]
+print(len(r), r[0]["NoncurrentVersionExpiration"]["NoncurrentDays"], r[0]["Expiration"], r[0]["AbortIncompleteMultipartUpload"]["DaysAfterInitiation"])' 2>&1)
+assert_eq "$lc" "1 30 {'ExpiredObjectDeleteMarker': True} 7" "uploads lifecycle: noncurrent 30 days, delete markers cleaned, never expires current"
+assert_not_contains "$(render uploads-lifecycle.json)" '"Days"' "uploads: current versions never expire (no Expiration Days)"
 assert_eq "$(cat "$STUB_LOG" 2>/dev/null)" "" "render_aws uses the cached account (no AWS call)"
 out=$(bash -c ". '$SKILL_DIR/scripts/lib.sh'; load_config '$SKILL_DIR/assets/project/deploy.yml'; EDH_ACCOUNT='1#x'; render_aws host-policy.json" 2>&1)
 assert_contains "$out" "not a 12-digit" "render_aws refuses a malformed pre-set account"

@@ -2,7 +2,9 @@
 Description=edh monthly restore drill
 After=docker.service
 Requires=docker.service
+RequiresMountsFor=/data
 
 [Service]
 Type=oneshot
+TimeoutStartSec=2h
 ExecStart=/opt/edh/bin/edh-drill.sh

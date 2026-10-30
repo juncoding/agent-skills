@@ -77,8 +77,10 @@ mv "$file.part" "$file"
 uploaded=0
 # upload <prefix> — create-only (--if-none-match '*'): the host policy allows nothing else, so the server can
 # never overwrite a backup (which would push the genuine one into a noncurrent version).
-# A single PUT is limited to 5 GB, which is fine for the dump sizes we target. Larger databases need
-# multipart upload, which also supports If-None-Match. TODO: multipart upload for dumps over 5 GB.
+# A single PUT is limited to 5 GB, which is fine for the dump sizes we target, and 5 GB is a HARD ceiling for
+# now: multipart upload can't work under the current policy, because UploadPart is authorised as s3:PutObject
+# without If-None-Match, which BackupsWrite denies (only CompleteMultipartUpload carries If-None-Match).
+# TODO: for dumps over 5 GB, change the policy to allow parts and switch to multipart upload with If-None-Match.
 upload() {
   aws s3api put-object --bucket "$EDH_BACKUP_BUCKET" --key "db/$1/$name" --body "$file" --if-none-match '*' \
     --expected-bucket-owner "$EDH_ACCOUNT_ID" --region "$EDH_REGION" >/dev/null

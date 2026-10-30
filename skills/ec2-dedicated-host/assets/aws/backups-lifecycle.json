@@ -1,10 +1,16 @@
 { "Rules": [
-  { "ID": "hourly",   "Status": "Enabled", "Filter": { "Prefix": "db/hourly/" },  "Expiration": { "Days": 3 } },
-  { "ID": "daily",    "Status": "Enabled", "Filter": { "Prefix": "db/daily/" },   "Expiration": { "Days": 90 } },
+  { "ID": "hourly",   "Status": "Enabled", "Filter": { "Prefix": "db/hourly/" },  "Expiration": { "Days": 3 },
+    "NoncurrentVersionExpiration": { "NoncurrentDays": 1 } },
+  { "ID": "daily",    "Status": "Enabled", "Filter": { "Prefix": "db/daily/" },   "Expiration": { "Days": 90 },
+    "NoncurrentVersionExpiration": { "NoncurrentDays": 7 } },
   { "ID": "monthly",  "Status": "Enabled", "Filter": { "Prefix": "db/monthly/" },
-    "Transitions": [ { "Days": 30, "StorageClass": "GLACIER_IR" } ], "Expiration": { "Days": 365 } },
-  { "ID": "safety",   "Status": "Enabled", "Filter": { "Prefix": "db/safety/" },  "Expiration": { "Days": 30 } },
-  { "ID": "bundles",  "Status": "Enabled", "Filter": { "Prefix": "_edh/bundles/" }, "Expiration": { "Days": 90 } },
+    "Transitions": [ { "Days": 30, "StorageClass": "GLACIER_IR" } ], "Expiration": { "Days": 365 },
+    "NoncurrentVersionExpiration": { "NoncurrentDays": 30 } },
+  { "ID": "safety",   "Status": "Enabled", "Filter": { "Prefix": "db/safety/" },  "Expiration": { "Days": 30 },
+    "NoncurrentVersionExpiration": { "NoncurrentDays": 7 } },
+  { "ID": "bundles",  "Status": "Enabled", "Filter": { "Prefix": "_edh/bundles/" }, "Expiration": { "Days": 90 },
+    "NoncurrentVersionExpiration": { "NoncurrentDays": 1 } },
   { "ID": "noncurrent", "Status": "Enabled", "Filter": { "Prefix": "" },
+    "Expiration": { "ExpiredObjectDeleteMarker": true },
     "NoncurrentVersionExpiration": { "NoncurrentDays": 30 }, "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 } }
 ] }
