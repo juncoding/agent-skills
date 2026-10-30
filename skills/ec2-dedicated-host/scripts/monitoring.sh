@@ -6,11 +6,11 @@
 . "$(dirname "$0")/lib.sh"
 load_config
 cmd="${1:-}"
-case "$cmd" in add|remove) require_account ;; esac   # status is read-only
+case "$cmd" in add|remove) oplog_begin monitoring "$cmd"; require_account ;; esac   # status is read-only
 ACCT=$(aws_account)
 TOPIC="${EDH_PREFIX}-alerts"
 ROLE="${EDH_PREFIX}-host"
-WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
+WORK=$(mktemp -d); at_exit 'rm -rf "$WORK"'
 
 topic_arn() { printf 'arn:aws:sns:%s:%s:%s' "$1" "$ACCT" "$TOPIC"; }
 

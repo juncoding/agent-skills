@@ -15,10 +15,23 @@ assert_contains "$y" "app_memory_mb: 700" "app memory set"
 assert_contains "$y" 'migrate_cmd: "npx prisma migrate deploy && node seed.js"' "migrate set (& kept literally)"
 assert_contains "$y" 'account_id: ""' "account_id left empty without --account-id"
 assert_contains "$y" "app_uses_instance_role: true" "app may use the instance role by default"
-for f in compose.yml Caddyfile maint/maintenance.html maint/down.html; do [[ -f "deploy/$f" ]] && pass "has $f" || fail "missing $f"; done
+for f in compose.yml Caddyfile maint/maintenance.html maint/down.html OPERATIONS.md; do [[ -f "deploy/$f" ]] && pass "has $f" || fail "missing $f"; done
+ops=$(cat deploy/OPERATIONS.md 2>/dev/null)
+assert_contains "$ops" "# Operations log" "OPERATIONS.md has a title"
+assert_contains "$ops" "## Notes" "OPERATIONS.md has a Notes section"
+assert_contains "$ops" "decisions, incidents, one-off work — written by people or the agent" "Notes: what goes there"
+assert_contains "$ops" "## Log" "OPERATIONS.md has a Log section"
+assert_contains "$ops" "appended automatically by ec2-dedicated-host; newest at the bottom" "Log: how it is written"
+assert_eq "$(grep -c '^- ' deploy/OPERATIONS.md)" "0" "a new OPERATIONS.md has no log lines yet"
 out=$(bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.example.com --emails a@example.com 2>&1)
 assert_contains "$out" "already exists" "refuses to overwrite"
 assert_contains "$(cat deploy/deploy.yml)" "uses_gotenberg: true" "refused init leaves deploy.yml untouched"
+
+# an existing OPERATIONS.md alone is enough to refuse (init never overwrites it)
+mkdir -p "$T/ops/deploy"; cd "$T/ops" || exit 1; echo "keep me" > deploy/OPERATIONS.md
+out=$(bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.example.com --emails a@example.com 2>&1); rc=$?
+assert_status $rc 1 "init refuses when deploy/OPERATIONS.md exists"
+assert_eq "$(cat deploy/OPERATIONS.md)" "keep me" "init leaves an existing OPERATIONS.md alone"
 
 # --account-id
 mkdir "$T/b"; cd "$T/b" || exit 1

@@ -43,6 +43,16 @@ something check the AWS account first, explain what they will do, and refuse rat
  Optional monitoring: CloudWatch alarms + Route 53 health check ──► SNS ──► email
 ```
 
+## Operations log: `deploy/OPERATIONS.md`
+
+**Before any DevOps work on a project, read `deploy/OPERATIONS.md`**: earlier decisions, incidents and every
+command that changed the server, with its result. Every mutating command appends one line under `## Log`
+automatically (success or failure; plan and read-only runs don't; secret *names* only, never values or the
+bypass token). **After anything notable** — an incident, a decision, a one-off operation done by hand — add a
+dated note under `## Notes` (e.g. `- 2026-10-31 — restored orders from the 18:00 backup after a bad import`).
+The skill never commits or pushes the file: suggest the user commit it. It doesn't count as a dirty tree for
+deploys. `init.sh` creates it; an older project gets it on the first logged command.
+
 ## Commands
 
 Run from the **project root** (the directory holding `deploy/`): `bash <this-skill>/scripts/<script> …`.
@@ -75,7 +85,8 @@ action. `teardown.sh` ignores it and needs `EDH_CONFIRM_NAME=<client>-<env>` (or
    (`app.example.com`), alert email(s). Region defaults to `ap-southeast-1`. Ask for the AWS account id to
    pin (or read it with `aws sts get-caller-identity` and confirm it with the user).
 3. **`init.sh`** with those values (+ `--gotenberg`, `--app-memory`, `--migrate` as the project needs). It
-   validates everything and writes `deploy/deploy.yml`, `compose.yml`, `Caddyfile`, `maint/*.html`.
+   validates everything and writes `deploy/deploy.yml`, `compose.yml`, `Caddyfile`, `maint/*.html` and
+   `OPERATIONS.md`.
 4. **Check the app contract** and fix gaps now: arm64-buildable Dockerfile, listens on `$PORT`, DB-aware
    `GET /health`, backward-compatible migrations. Commit `deploy/` and the fixes; ask the user to push or
    merge them into `main` through their own review process (or push only if they ask you to).
@@ -100,7 +111,7 @@ action. `teardown.sh` ignores it and needs `EDH_CONFIRM_NAME=<client>-<env>` (or
 Run `deploy.sh` without asking: it builds the current commit, ships, migrates, health-checks and rolls
 back on its own. Before anything is built, for `env: prod` it runs `git fetch origin main` and **refuses
 unless the current branch is `main`, HEAD is exactly `origin/main` and the working tree is clean**
-(`prod_branch:` in deploy.yml names another branch than `main`):
+(`prod_branch:` in deploy.yml names another branch than `main`; changes to `deploy/OPERATIONS.md` don't count):
 
 | Refusal says | Tell the user / do |
 |---|---|

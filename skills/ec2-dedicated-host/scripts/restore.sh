@@ -15,6 +15,7 @@
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$(dirname "$0")/lib.sh"
 load_config
+oplog_begin restore "$*"   # refined below to "db check|replace <key>" / "disk <snapshot>"
 require_account
 ACCT=$(aws_account)
 require_instance
@@ -116,6 +117,7 @@ case "${1:-}" in
     else
       log "backup $key (the server verifies it against its backup manifest)"
     fi
+    OPLOG_DETAIL="db $( (( check )) && echo check || echo replace) $key${unv}"
     if (( check )); then
       ssm_run "$EDH_IID" 2400 "/opt/edh/bin/edh-restore.sh check $key --keep$unv" || die "restore check of $key failed (see the output above)"
       ok "restored $key into database app_restore_check (live data untouched)"
@@ -128,7 +130,7 @@ case "${1:-}" in
     fi ;;
   disk)
     [[ "${2:-}" == --snapshot && "${3:-}" =~ ^snap-[0-9a-f]+$ ]] || die "usage: restore.sh disk --snapshot snap-... [--foreign-snapshot]"
-    snap="$3"; foreign=0
+    snap="$3"; foreign=0; OPLOG_DETAIL="disk $snap"
     case "${4:-}" in "") ;; --foreign-snapshot) foreign=1 ;; *) die "unknown option: $4" ;; esac
     # only this project's snapshots (DLM copies the volume's tags; upgrade.sh tags its own)
     stags=$(awsr ec2 describe-snapshots --snapshot-ids "$snap" \
@@ -181,10 +183,9 @@ umount /data' || rc=$?
       die "could not stop the app and unmount /data (exit $rc) — nothing was swapped; the old volume $old_id stays in use. The new volume $new_id (tagged data-restoring) is unused: delete it by hand."
     fi
     # from here on, any failure prints where both volumes are and how to put the old one back
-    swap_recovery() {
-      local rc=$?
-      trap - EXIT
-      if (( rc == 0 )); then exit 0; fi
+    swap_recovery() {   # at_exit: runs on any exit; $EDH_RC is the exit code
+      local rc="$EDH_RC"
+      if (( rc == 0 )); then return 0; fi
       printf '\n\033[1;31mThe data volume swap stopped half way (exit %s).\033[0m\n' "$rc" >&2
       printf '  old data volume: %s\n  new volume:      %s\n  current state (id, state, attached to, edh:role):\n' "$old_id" "$new_id" >&2
       awsr ec2 describe-volumes --volume-ids "$old_id" "$new_id" \
@@ -200,9 +201,8 @@ To put the old volume back (skip the steps that are already the case):
 then on the server (Session Manager):
   sudo mount -a && sudo systemctl start docker && cd /opt/edh/app && sudo docker compose up -d && sudo systemctl start edh-backup.timer edh-drill.timer
 EOR
-      exit "$rc"
     }
-    trap swap_recovery EXIT
+    at_exit swap_recovery
     awsr ec2 detach-volume --volume-id "$old_id" >/dev/null
     awsr ec2 wait volume-available --volume-ids "$old_id"
     awsr ec2 create-tags --resources "$old_id" --tags "Key=edh:role,Value=data-replaced-$(date +%Y%m%d)"
@@ -215,11 +215,11 @@ EOR
     ssm_run "$EDH_IID" 600 "${up_script//VOLID/${new_id//-/}}" || rc=$?
     if (( rc == 4 )); then
       # the swap itself completed: the half-way recovery guidance would mislead
-      trap - EXIT
+      at_exit ""
       die "the data volume swap completed ($new_id is attached and mounted at /data, the app was started), but the app is unhealthy — run status.sh and check the app's logs. The old volume $old_id is detached and kept (tagged data-replaced)."
     fi
     (( rc == 0 )) || die "bringing the server back on the new data volume $new_id failed (exit $rc) — see the output above"
-    trap - EXIT
+    at_exit ""
     ok "data volume replaced: $new_id (old $old_id kept, tagged data-replaced — delete it by hand once satisfied)" ;;
   *) die "usage: restore.sh db (--date YYYY-MM-DD | --key db/... | --latest) [--check] [--unverified] | disk --snapshot snap-... [--foreign-snapshot]" ;;
 esac

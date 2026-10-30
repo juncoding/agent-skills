@@ -10,13 +10,13 @@
 KEEP_IP=0
 case "${1:-}" in "") ;; --keep-ip) KEEP_IP=1 ;; *) die "usage: teardown.sh [--keep-ip]" ;; esac
 load_config
+oplog_begin teardown "$( (( KEEP_IP )) && echo --keep-ip)"
 require_account
 ACCT=$(aws_account)
 ROLE="${EDH_PREFIX}-host"
 # the kept-data summary is printed however teardown ends (also after a failure half way)
 kept_message() {
-  local rc=$? ipline
-  trap - EXIT
+  local ipline
   if (( KEEP_IP )); then
     ipline="  - the Elastic IP (--keep-ip): a rebuilt server gets the same public IP; DNS needs no change"
   else
@@ -34,13 +34,12 @@ $ipline
 Re-running provision.sh --apply reuses all of it. To delete data permanently, do it by hand in the console
 after taking a final backup — this skill never deletes resources tagged Protect=true.
 EOF
-  exit "$rc"
 }
-trap kept_message EXIT
+at_exit kept_message
 log "teardown $EDH_NAME (account $ACCT): terminate server, release IP, delete security group, IAM role, snapshot policy, monitoring"
 if [[ "${EDH_CONFIRM_NAME:-}" != "$EDH_NAME" ]]; then
   a=""; read -r -p "Type '$EDH_NAME' to confirm: " a || true
-  [[ "$a" == "$EDH_NAME" ]] || die "aborted"
+  [[ "$a" == "$EDH_NAME" ]] || { OPLOG_RESULT=aborted; die "aborted"; }
 fi
 
 iid=$(instance_id)
@@ -58,7 +57,7 @@ if [[ -n "$iid" ]]; then
 fi
 
 # whatever deploy.yml says now (monitoring may have been switched off since): remove uses exact names and is idempotent
-EDH_YES=1 "$BASH" "$(dirname "$0")/monitoring.sh" remove || warn "monitoring removal incomplete"
+EDH_YES=1 EDH_OPLOG_SKIP=1 "$BASH" "$(dirname "$0")/monitoring.sh" remove || warn "monitoring removal incomplete"
 if [[ -n "$iid" ]]; then
   awsr ec2 modify-instance-attribute --instance-id "$iid" --no-disable-api-termination
   awsr ec2 terminate-instances --instance-ids "$iid" >/dev/null

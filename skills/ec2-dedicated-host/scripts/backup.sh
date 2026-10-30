@@ -7,9 +7,14 @@
 load_config
 case "${1:-}" in
   now)
+    oplog_begin backup now
     require_account
     require_instance
-    ssm_run "$EDH_IID" 2400 '/opt/edh/bin/edh-backup.sh --tag manual --force' || die "backup failed (see the output above)"
+    out=$(ssm_run "$EDH_IID" 2400 '/opt/edh/bin/edh-backup.sh --tag manual --force') \
+      || { printf '%s\n' "$out"; die "backup failed (see the output above)"; }
+    printf '%s\n' "$out"
+    name=$(printf '%s\n' "$out" | tail -n 1)   # edh-backup.sh prints the dump's file name last
+    if [[ "$name" =~ ^app-[0-9]{8}T[0-9]{6}Z\.dump$ ]]; then OPLOG_DETAIL="now db/daily/$name"; fi
     ok "backup uploaded to db/daily/" ;;
   list)
     n="${2:-20}"; [[ "$n" =~ ^[0-9]+$ ]] || die "N must be a number"

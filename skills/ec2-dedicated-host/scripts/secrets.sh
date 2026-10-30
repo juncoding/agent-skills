@@ -8,7 +8,7 @@
 . "$(dirname "$0")/lib.sh"
 load_config
 cmd="${1:-}"
-case "$cmd" in set|delete) require_account ;; esac   # list is read-only
+case "$cmd" in set|delete) oplog_begin secrets "$cmd ${2:-}"; require_account ;; esac   # list is read-only; the log gets the NAME only
 
 # check_name <name> — also keeps the reserved _edh/ parameters out of reach
 check_name() {
@@ -23,7 +23,7 @@ case "$cmd" in
     [[ -n "$v" ]] || die "empty value"
     # the server refuses values with a newline or tab when it writes app.env: refuse them here already
     case "$v" in *$'\n'*|*$'\r'*|*$'\t'*) die "the value must not contain a newline or tab" ;; esac
-    WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
+    WORK=$(mktemp -d); at_exit 'rm -rf "$WORK"'
     ( umask 077; printf '%s' "$v" > "$WORK/value" )   # no trailing newline: the file content is the value
     awsr ssm put-parameter --name "$EDH_SSM_PATH/$2" --type SecureString --value "file://$WORK/value" --overwrite >/dev/null \
       || die "could not store $EDH_SSM_PATH/$2"

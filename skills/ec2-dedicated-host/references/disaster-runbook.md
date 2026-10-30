@@ -1,6 +1,7 @@
 # Disaster runbook
 
-First, always: **`status.sh`** (read-only). Then the matching section. Anything that stops the site or
+First, always: **`status.sh`** (read-only) and a look at `deploy/OPERATIONS.md` (what was changed last, and
+what failed). Then the matching section. Afterwards, add a dated note about the incident under `## Notes`. Anything that stops the site or
 touches data: tell the user what you will do and wait for a yes. Server commands below run in a Session
 Manager shell (`aws ssm start-session --target <instance-id>`; no SSH). Never print the app's environment.
 

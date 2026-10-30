@@ -17,6 +17,7 @@ for a in "$@"; do
   case "$a" in --maint) MAINT=--maint ;; --allow-dirty) DIRTY_OK=1 ;; --allow-non-main) NON_MAIN_OK=1 ;; *) die "unknown option: $a" ;; esac
 done
 load_config
+oplog_begin deploy
 require aws
 require_account
 require docker; require git; require curl
@@ -109,7 +110,7 @@ check_prod_source() {
   fi
   [[ -n "$why" ]] || return 0
   if (( ! NON_MAIN_OK )); then
-    die "prod deploys must be exactly origin/$pb: $why.
+    refuse "prod deploys must be exactly origin/$pb: $why.
   Fix: $fix
   (Emergency hotfix only, and only if the user asks: deploy.sh --allow-non-main)"
   fi
@@ -118,14 +119,17 @@ check_prod_source() {
   warn "deploying branch '${branch:-detached HEAD}' at $head \"$subject\"$( (( dirty )) && echo ' with uncommitted changes') to $EDH_NAME"
   warn "the next normal deploy from $pb replaces it: get this fix into $pb through your review"
   confirm "Deploy branch '${branch:-detached HEAD}' at $head (not origin/$pb) to PROD $EDH_NAME?"
+  OPLOG_DETAIL="$OPLOG_DETAIL (EMERGENCY --allow-non-main: branch ${branch:-detached HEAD})"
 }
 
 check_compose
 SHA=$(git rev-parse --short=12 HEAD) || die "not a git repository (run from the project root)"
+OPLOG_DETAIL="$SHA \"$(git log -1 --format=%s HEAD)\""
 DIRTY=0
-if [[ -n "$(git status --porcelain)" ]]; then
-  (( DIRTY_OK )) || die "uncommitted changes — commit first, or pass --allow-dirty"
-  DIRTY=1; SHA="${SHA}-dirty$(date +%s)"
+# deploy/OPERATIONS.md doesn't count: deploys append to it, and that must not block the next deploy
+if [[ -n "$(git status --porcelain -- . ':(exclude)deploy/OPERATIONS.md')" ]]; then
+  (( DIRTY_OK )) || refuse "uncommitted changes — commit first, or pass --allow-dirty"
+  DIRTY=1; SHA="${SHA}-dirty$(date +%s)"; OPLOG_DETAIL="$SHA ${OPLOG_DETAIL#* }"
 fi
 [[ "$SHA" =~ ^[0-9a-f]+(-dirty[0-9]+)?$ ]] || die "unexpected commit id: '$SHA'"   # goes into the remote script
 if [[ "$EDH_ENV" == prod ]]; then check_prod_source "$DIRTY"; fi
@@ -146,7 +150,7 @@ docker buildx build --platform linux/arm64 -f "$EDH_DOCKERFILE" -t "$IMAGE" --pu
 
 log "2/4 ship config bundle"
 tgz=$(make_bundle "$SHA")
-trap 'rm -f "$tgz"' EXIT
+at_exit 'rm -f "$tgz"'
 # s3api with --expected-bucket-owner: bucket names are global, the bundle only goes to this account's bucket
 awsr s3api put-object --bucket "$BUCKET" --key "_edh/bundles/$SHA.tgz" --body "$tgz" --expected-bucket-owner "$ACCT" >/dev/null
 
@@ -166,9 +170,9 @@ bash \"\$R/host/edh-deploy.sh\" \"\$R\" $IMAGE $MAINT" || rc=$?
 case $rc in
   0) ;;
   1) die "deploy stopped before the swap — the previous version is still serving, with its previous configuration (on a first deploy: nothing was serving yet). See the output above." ;;
-  2) die "new version failed its health check — rolled back to the previous version" ;;
+  2) OPLOG_RESULT="rolled back"; die "new version failed its health check — rolled back to the previous version" ;;
   3) die "deploy failed and no healthy version is running — the site may be down; run status.sh" ;;
-  124) die "the deploy is still running on the server after the timeout — run status.sh to see how it ended" ;;
+  124) OPLOG_RESULT="timed out (still running)"; die "the deploy is still running on the server after the timeout — run status.sh to see how it ended" ;;
   *) die "deploy failed (exit $rc) — the site may be down; run status.sh" ;;
 esac
 

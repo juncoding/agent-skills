@@ -12,6 +12,7 @@
 
 APPLY=0; if [[ "${1:-}" == --apply ]]; then APPLY=1; fi
 load_config
+if (( APPLY )); then oplog_begin provision apply; fi   # plan mode changes nothing and isn't logged
 require aws
 require_account
 ACCT=$(aws_account)
@@ -28,7 +29,7 @@ if [[ "$EDH_APP_USES_INSTANCE_ROLE" == true ]]; then HOP=2; else HOP=1; fi
 VPC=$(awsr ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId' --output text)
 [[ -n "$VPC" && "$VPC" != None ]] || die "no default VPC in $EDH_REGION"
 SG_ID="" VOL_ID="" VOL_AZ="" AZ="" SUBNET="" EIP_ALLOC="" EIP_IP="" EDH_IID=""
-WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT   # temp files (secrets, rendered policies), removed on any exit
+WORK=$(mktemp -d); at_exit 'rm -rf "$WORK"'   # temp files (secrets, rendered policies), removed on any exit
 IAM_WAIT="${EDH_IAM_WAIT:-15}"                   # seconds for IAM changes to propagate (tests: 0)
 
 # step <description> <check-fn> <create-fn>
@@ -315,6 +316,7 @@ else                           # a new server: an AZ that offers the type and ha
   [[ -n "$SUBNET" && "$SUBNET" != None ]] || die "no default subnet in $AZ (VPC $VPC)"
 fi
 log "placement: $TYPE in $AZ"
+if (( APPLY )); then OPLOG_DETAIL="apply ($TYPE in $AZ)"; fi
 
 # ---- create what is missing; re-apply settings
 step "IAM role $ROLE" has_role make_role
@@ -354,7 +356,7 @@ if (( APPLY )); then
   fi
   (( st == 0 )) || die "bootstrap did not finish within 10 minutes — check /var/log/edh-bootstrap.log via Session Manager"
   ok "server ready: $EDH_IID at $EIP_IP"
-  if [[ "$EDH_MONITORING" == cloudwatch ]]; then "$BASH" "$(dirname "$0")/monitoring.sh" add; fi
+  if [[ "$EDH_MONITORING" == cloudwatch ]]; then EDH_OPLOG_SKIP=1 "$BASH" "$(dirname "$0")/monitoring.sh" add; fi
   log "DNS: point an A record for $EDH_DOMAIN to $EIP_IP (needed before the first deploy can get HTTPS)"
 else
   warn "attach volume, associate IP, snapshot policy, bootstrap wait$( [[ "$EDH_MONITORING" == cloudwatch ]] && echo ', monitoring')"

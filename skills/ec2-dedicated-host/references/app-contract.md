@@ -155,5 +155,6 @@ bake such files into an image, or pass the settings as environment through `secr
 The scripts read a few environment switches meant **only for the test suite** — `EDH_SKIP_SSM`,
 `EDH_SKIP_PULL`, `EDH_SKIP_PRUNE`, `EDH_NO_SYSTEMD`, `EDH_SSM_POLL_SECONDS`, `EDH_REBOOT_POLL_SECONDS`,
 `EDH_IAM_WAIT`, `EDH_HEALTH_TRIES`, `EDH_HTTP_PORT`, `EDH_HTTPS_PORT`, and the path overrides `EDH_ENV_FILE`,
-`EDH_APP_DIR`, `EDH_DATA_DIR`, `EDH_BIN_DIR`, `EDH_LOCK_FILE`, `EDH_MANIFEST`. Don't set them in real use. The
-only switches for real use are `EDH_YES=1` and `EDH_CONFIRM_NAME` (after the user agreed).
+`EDH_APP_DIR`, `EDH_DATA_DIR`, `EDH_BIN_DIR`, `EDH_LOCK_FILE`, `EDH_MANIFEST`. Don't set them in real use.
+`EDH_OPLOG_SKIP=1` is internal (a script calling another one sets it so one action is logged once). The only
+switches for real use are `EDH_YES=1` and `EDH_CONFIRM_NAME` (after the user agreed).

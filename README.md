@@ -56,6 +56,9 @@ One client, one server, everything driven from the project's `deploy/deploy.yml`
 - **Backups you can trust**: hourly/daily/monthly `pg_dump` to write-once S3, daily/weekly volume snapshots,
   restores verified against a host-only manifest (S3 VersionId + sha256), a monthly automatic restore drill.
 - **Monitoring** (optional): CloudWatch alarms + a Route 53 health check, emailed via SNS.
+- **Operations log**: `deploy/OPERATIONS.md` in the project gets one line per command that changed the server
+  (deploys, rollbacks, maintenance, restores, resizes, … — success or failure, never secret values), and a
+  Notes section for decisions and incidents. The agent reads it before working on the server; you commit it.
 
 ## Installation
 

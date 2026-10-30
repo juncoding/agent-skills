@@ -4,6 +4,7 @@
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$(dirname "$0")/lib.sh"
 load_config
+oplog_begin resize "${1:-} ${2:-}"
 require_account
 require_instance
 
@@ -20,6 +21,7 @@ case "${1:-}" in
     cur=$(awsr ec2 describe-instances --instance-ids "$EDH_IID" \
       --query 'Reservations[0].Instances[0].[InstanceType,Placement.AvailabilityZone]' --output text)
     az=$(printf '%s' "$cur" | cut -f2); cur=$(printf '%s' "$cur" | cut -f1)
+    OPLOG_DETAIL="instance $cur → $new"
     [[ "$cur" != "$new" ]] || die "already $new"
     # the images are built for arm64 (Graviton): ask EC2 rather than guess from the name
     arch=$(awsr ec2 describe-instance-types --instance-types "$new" \
@@ -47,7 +49,7 @@ case "${1:-}" in
     ok "now $new — set instance_type: $new in deploy/deploy.yml"
     # the alarms depend on the type (the CPU credit alarm exists only for t-family servers): monitoring.sh add
     # re-creates them, and deletes a stale credit alarm
-    if [[ "$EDH_MONITORING" == cloudwatch ]]; then "$BASH" "$(dirname "$0")/monitoring.sh" add; fi ;;
+    if [[ "$EDH_MONITORING" == cloudwatch ]]; then EDH_OPLOG_SKIP=1 "$BASH" "$(dirname "$0")/monitoring.sh" add; fi ;;
   disk)
     gb="${2:-}"; [[ "$gb" =~ ^[0-9]+$ ]] || die "usage: resize.sh disk <GB>"
     gb=$((10#$gb))
@@ -55,6 +57,7 @@ case "${1:-}" in
     id="$EDH_VOL_ID"
     size=$(awsr ec2 describe-volumes --volume-ids "$id" --query 'Volumes[0].Size' --output text)
     [[ "$size" =~ ^[0-9]+$ ]] || die "cannot read the size of $id"
+    OPLOG_DETAIL="disk $size → $gb GB"
     (( gb > size )) || die "new size must be larger than the current $size GB (volumes cannot shrink)"
     confirm "Grow data volume $id from $size GB to $gb GB?"
     awsr ec2 modify-volume --volume-id "$id" --size "$gb" >/dev/null

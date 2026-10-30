@@ -11,6 +11,7 @@ printf '#!/bin/sh\nexit 0\n' > "$T/bin/curl"
 printf '#!/bin/sh\necho 203.0.113.10\n' > "$T/bin/dig"
 chmod +x "$T/bin/"*
 export PATH="$T/bin:$TESTS_DIR/stubs:$PATH" STUB_LOG="$T/log" STUB_S3="$T/s3" STUB_MODE=existing EDH_SSM_POLL_SECONDS=0
+export EDH_OPLOG_SKIP=1   # deploys here don't append to deploy/OPERATIONS.md (it would get in the way of branch switches)
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com
 
 git init -q --bare -b main "$T/origin.git"
@@ -68,6 +69,16 @@ assert_status $rc 0 "prod, dirty tree, both flags, consent: deploys"
 assert_contains "$out" "EMERGENCY" "prod, dirty tree: EMERGENCY warning"
 assert_contains "$out" "with uncommitted changes" "prod, dirty tree: the warning says so"
 rm -f scratch.txt
+
+# ============ deploy/OPERATIONS.md doesn't count as a dirty tree (deploys write it); anything else does
+echo "- a note" >> deploy/OPERATIONS.md
+out=$(run); rc=$?
+assert_status $rc 0 "prod with only deploy/OPERATIONS.md changed: deploys"
+assert_not_contains "$out" "with uncommitted changes" "OPERATIONS.md changes don't mark the build dirty"
+echo dirty > scratch.txt
+out=$(run); rc=$?
+assert_status $rc 1 "prod with OPERATIONS.md and another file changed: refused"
+rm -f scratch.txt; git checkout -q -- deploy/OPERATIONS.md
 
 # ============ prod_branch: another branch name for prod
 git checkout -q -b release && git push -q origin release

@@ -264,6 +264,8 @@ Building and reviewing the skill hardened it well beyond the design. The importa
   configured by the skill. Known limitation: the CloudWatch agent package's signature is not verified.
 - **Secrets** are read from stdin and passed to AWS through 0600 temp files, never on a command line; the
   user enters them with `!`-prefixed commands so values never enter the chat.
+- **Operations log** (new): `deploy/OPERATIONS.md`, created by `init.sh`, gets one line per mutating command
+  (result and key detail, never secret values) plus human/agent notes; read before any operations work.
 - **Teardown** releases the Elastic IP (a rebuilt server gets a new IP; DNS must be updated) unless
   `--keep-ip`.
 - **IAM trims.** The host can read backups only by key/version (no `s3:ListBucket`); the agent policy has

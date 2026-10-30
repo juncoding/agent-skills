@@ -6,6 +6,7 @@
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$(dirname "$0")/lib.sh"
 load_config
+oplog_begin upgrade "os${2:+ $2}"
 require_account
 require_instance
 [[ "${1:-}" == os && ( -z "${2:-}" || "${2:-}" == --reboot ) ]] || die "usage: upgrade.sh os [--reboot]"
@@ -18,6 +19,7 @@ snap=$(awsr ec2 create-snapshot --volume-id "$EDH_VOL_ID" --description "$EDH_PR
   --tag-specifications "$(tag_spec snapshot "${EDH_PREFIX}-pre-upgrade")" --query SnapshotId --output text)
 [[ -n "$snap" && "$snap" != None ]] || die "could not take the safety snapshot — nothing upgraded"
 ok "safety snapshot $snap (kept until you delete it by hand)"
+OPLOG_DETAIL="$OPLOG_DETAIL (safety snapshot $snap)"
 
 # ping_epoch <LastPingDateTime> — seconds since the epoch (0 if unreadable)
 ping_epoch() {

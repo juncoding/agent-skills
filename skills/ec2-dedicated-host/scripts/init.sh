@@ -2,7 +2,8 @@
 # init.sh --client NAME --domain FQDN [--emails a@x,b@y] [--env prod] [--region R] [--account-id 123456789012]
 #         [--monitoring cloudwatch|none] [--gotenberg] [--no-instance-role] [--app-memory MB] [--app-port N]
 #         [--migrate "CMD"]
-# Scaffold deploy/ (deploy.yml, compose.yml, Caddyfile, maint pages) in the current project. Never overwrites.
+# Scaffold deploy/ (deploy.yml, compose.yml, Caddyfile, maint pages, OPERATIONS.md) in the current project.
+# Never overwrites.
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
@@ -25,13 +26,13 @@ while [[ $# -gt 0 ]]; do
   shift 2
 done
 A="$EDH_SKILL_DIR/assets/project"
-for f in deploy.yml compose.yml Caddyfile maint/maintenance.html maint/down.html; do
+for f in deploy.yml compose.yml Caddyfile maint/maintenance.html maint/down.html OPERATIONS.md; do
   [[ ! -e "deploy/$f" ]] || die "deploy/$f already exists — edit it instead"
 done
 
 # esc <value> — safe as sed replacement text with # as the delimiter
 esc() { printf '%s' "$1" | sed -e 's/[\\&#]/\\&/g'; }
-tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+tmp=$(mktemp); at_exit 'rm -f "$tmp"'
 args=(-e "s#^client: .*#client: $(esc "$client")#" -e "s#^env: .*#env: $(esc "$env")#"
       -e "s#^region: .*#region: $(esc "$region")#" -e "s#^domain: .*#domain: $(esc "$domain")#"
       -e "s#^alert_emails: .*#alert_emails: $(esc "$emails")#" -e "s#^monitoring: .*#monitoring: $(esc "$monitoring")#"
@@ -45,4 +46,5 @@ mkdir -p deploy/maint
 cp "$tmp" deploy/deploy.yml
 cp "$A/compose.yml" "$A/Caddyfile" deploy/
 cp "$A/maint/"*.html deploy/maint/
+cp "$A/OPERATIONS.md" deploy/OPERATIONS.md   # the operations log (see oplog in lib.sh)
 ok "created deploy/ for $EDH_NAME ($domain)"

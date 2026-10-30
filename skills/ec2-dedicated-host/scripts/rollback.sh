@@ -4,6 +4,7 @@
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$(dirname "$0")/lib.sh"
 load_config
+oplog_begin rollback
 require_account
 require_instance
 confirm "Roll $EDH_NAME back to the previous version?"

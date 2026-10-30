@@ -9,9 +9,69 @@ EDH_SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*" >&2; }
 ok()   { printf '\033[1;32m  ✓\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[1;33m  !\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
-refuse() { die "$@"; }   # a refusal (the request breaks a rule), as opposed to something failing
+# die <message> — print it and exit 1; its first line also goes into the operations-log entry (oplog_finish)
+die()  {
+  printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2
+  OPLOG_REASON=$(printf '%s\n' "$*" | head -n 1 | cut -c1-200)
+  exit 1
+}
+# refuse <message> — die, logged as "refused" (the request breaks a rule) rather than "failed"
+refuse() { OPLOG_RESULT=refused; die "$@"; }
 require() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
+
+# ---- operations log (deploy/OPERATIONS.md) and the EXIT handling around it
+# A mutating command calls oplog_begin <command> [detail]; when the script exits — however it exits — one line
+# is appended: "- <date> UTC · <command> · <result> · <detail> · <who>". Result: ok, failed (exit N), refused,
+# aborted, or what the script put in OPLOG_RESULT (e.g. "rolled back"); a die message's first line is added.
+# Scripts register their own cleanup with at_exit (not trap … EXIT), which runs first.
+# NEVER put a secret value or the bypass token into a detail.
+OPLOG_CMD="" OPLOG_DETAIL="" OPLOG_RESULT="" OPLOG_REASON="" OPLOG_DONE=0 EDH_AT_EXIT="" EDH_RC=0
+oplog_begin() { OPLOG_CMD="$1"; OPLOG_DETAIL="${2:-}"; }
+at_exit() { EDH_AT_EXIT="$1"; }   # at_exit <code> — cleanup to run on exit ($EDH_RC holds the exit code)
+oplog_finish() {
+  local rc="$1" res
+  [[ -n "$OPLOG_CMD" && "$OPLOG_DONE" != 1 ]] || return 0
+  OPLOG_DONE=1
+  if [[ -n "$OPLOG_RESULT" ]]; then res="$OPLOG_RESULT"; elif (( rc == 0 )); then res=ok; else res="failed (exit $rc)"; fi
+  if [[ "$OPLOG_REASON" == "$res" ]]; then OPLOG_REASON=""; fi   # "aborted · aborted"
+  oplog "$OPLOG_CMD" "$res" "$OPLOG_DETAIL${OPLOG_REASON:+${OPLOG_DETAIL:+ — }$OPLOG_REASON}"
+}
+edh_on_exit() {
+  local rc=$?
+  trap - EXIT
+  # shellcheck disable=SC2034  # read by at_exit handlers
+  EDH_RC=$rc
+  if [[ -n "$EDH_AT_EXIT" ]]; then eval "$EDH_AT_EXIT" || true; fi
+  oplog_finish "$rc" || true
+  exit "$rc"
+}
+trap edh_on_exit EXIT
+
+# oplog <command> <result> [detail…] — append one line under "## Log" in deploy/OPERATIONS.md (run from the
+# project root), creating the file from the template if it is missing. Never fails the caller: a write error
+# only warns. EDH_OPLOG_SKIP=1 turns it off (scripts calling another script set it, so one action logs once).
+oplog() {
+  [[ "${EDH_OPLOG_SKIP:-}" != 1 ]] || return 0
+  local cmd="$1" res="$2" detail="" who line
+  shift 2
+  detail="$*"
+  who=$(git config user.name 2>/dev/null || true)
+  who="${who:-${USER:-unknown}}"
+  line="- $(date -u '+%Y-%m-%d %H:%M') UTC · $cmd · $res${detail:+ · $detail} · $who"
+  line=$(printf '%s' "$line" | tr '\r\n\t' '   ')
+  oplog_write "$line" 2>/dev/null || warn "could not write the operations log deploy/OPERATIONS.md"
+  return 0
+}
+oplog_write() {
+  local f=deploy/OPERATIONS.md last
+  [[ -d deploy && ! -d "$f" ]] || return 1
+  if [[ ! -f "$f" ]]; then cp "$EDH_SKILL_DIR/assets/project/OPERATIONS.md" "$f" || return 1; fi
+  if ! grep -q '^## Log' "$f"; then printf '\n## Log\n' >> "$f" || return 1; fi
+  if [[ -n "$(tail -c 1 "$f")" ]]; then printf '\n' >> "$f" || return 1; fi
+  last=$(tail -n 1 "$f")
+  if [[ -n "$last" && "$last" != "- "* ]]; then printf '\n' >> "$f" || return 1; fi   # a list after the heading text
+  printf '%s\n' "$1" >> "$f"
+}
 
 # cfg_get <file> <key> [default] — value of a flat `key: value` line; strips quotes and trailing comments.
 cfg_get() {
@@ -133,7 +193,7 @@ require_account() {
     fi
     return 0
   fi
-  [[ "$EDH_ACCOUNT" == "$EDH_ACCOUNT_ID" ]] || die "AWS credentials are for account $EDH_ACCOUNT but deploy.yml says $EDH_ACCOUNT_ID"
+  [[ "$EDH_ACCOUNT" == "$EDH_ACCOUNT_ID" ]] || refuse "AWS credentials are for account $EDH_ACCOUNT but deploy.yml says $EDH_ACCOUNT_ID"
 }
 
 # tag_spec <resource-type> <name> [Key=Value ...] — value for --tag-specifications
@@ -151,7 +211,7 @@ guard_not_protected() {
   v=$(awsr ec2 describe-tags --filters "Name=resource-id,Values=$1" "Name=key,Values=Protect" --query 'Tags[0].Value' --output text) \
     || die "refusing: cannot read tags of $1 to check Protect=true"
   v=$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')
-  [[ "$v" != true ]] || die "refusing: $1 is tagged Protect=true (it holds data). Remove the tag by hand only if you really mean it."
+  [[ "$v" != true ]] || refuse "refusing: $1 is tagged Protect=true (it holds data). Remove the tag by hand only if you really mean it."
 }
 
 # confirm <question> — EDH_YES=1 skips the prompt (the agent sets it only after the user agreed in chat).
@@ -160,7 +220,7 @@ confirm() {
   if [[ "${EDH_YES:-}" == 1 ]]; then return 0; fi
   read -r -p "$1 [y/N] " a || true
   a=$(printf '%s' "$a" | tr '[:upper:]' '[:lower:]')
-  [[ "$a" == y || "$a" == yes ]] || die "aborted"
+  [[ "$a" == y || "$a" == yes ]] || { OPLOG_RESULT=aborted; die "aborted"; }
 }
 
 # gen_secret [length] — random hex string, 1-64 characters (default 40).

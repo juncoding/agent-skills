@@ -9,9 +9,21 @@
 . "$(dirname "$0")/lib.sh"
 load_config
 cmd="${1:-}"; shift || true
-case "$cmd" in on|off|rotate-bypass) require_account ;; esac   # status is read-only
 link=1; args=()
 for a in "$@"; do if [[ "$a" == --no-link ]]; then link=0; else args+=("$a"); fi; done
+# operations log: the command, and for "on" its message and time (never the bypass token)
+oplog_detail() {
+  local d="$cmd" i=0 n=${#args[@]}
+  while (( i < n )); do
+    case "${args[$i]}" in
+      --message) d="$d \"${args[$((i + 1))]:-}\""; i=$((i + 2)) ;;
+      --until) d="$d until ${args[$((i + 1))]:-}"; i=$((i + 2)) ;;
+      *) i=$((i + 1)) ;;
+    esac
+  done
+  printf '%s' "$d"
+}
+case "$cmd" in on|off|rotate-bypass) oplog_begin maint "$(oplog_detail)"; require_account ;; esac   # status is read-only
 remote() { ssm_run "$EDH_IID" 120 "$(printf '%q ' /opt/edh/bin/edh-maint.sh "$@")"; }
 site_alarm="${EDH_PREFIX}-site-down"
 
@@ -39,7 +51,7 @@ case "$cmd" in
   rotate-bypass)
     v=$(gen_secret 40)
     [[ "$v" =~ ^[0-9a-f]{40}$ ]] || die "gen_secret returned an unexpected value"
-    WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
+    WORK=$(mktemp -d); at_exit 'rm -rf "$WORK"'
     ( umask 077; printf '%s' "$v" > "$WORK/token" )   # by file, never on the command line
     awsr ssm put-parameter --name "$EDH_SSM_PATH/_edh/maint-bypass" --type SecureString --value "file://$WORK/token" \
       --overwrite >/dev/null || die "could not store the new bypass token"
