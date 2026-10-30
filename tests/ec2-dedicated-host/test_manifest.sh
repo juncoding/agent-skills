@@ -47,11 +47,39 @@ assert_eq "$v" "v1" "manifest: the VersionId S3 returned"
 assert_eq "$([[ "$when" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$ ]] && echo utc)" "utc" "manifest: the UTC time"
 assert_eq "$(mode "$M")" "600" "manifest is 0600"
 assert_contains "$(grep put-object "$STUB_LOG")" "--query VersionId" "backup asks S3 for the VersionId"
-# only the newest 2000 lines are kept
-for i in $(seq 1 2100); do printf 'db/old/app-%05d.dump\tx\tv1\t2020-01-01T00:00:00Z\n' "$i"; done > "$M"
+# trimmed by age per tier, as long as S3 keeps them (backups-lifecycle.json) plus a 2-day margin
+lc=$(python3 -I -c 'import json, sys
+print(" ".join("%s:%d" % (r["Filter"]["Prefix"].split("/")[1], r["Expiration"]["Days"]) for r in json.load(open(sys.argv[1]))["Rules"]
+               if r["Filter"]["Prefix"].startswith("db/")))' "$SKILL_DIR/assets/aws/backups-lifecycle.json")
+assert_eq "$(sed -n 's/^RETAIN_DAYS="\(.*\)"$/\1/p' "$H/edh-backup.sh")" "$lc" "manifest retention per tier matches the S3 lifecycle"
+python3 -I - "$M" <<'PY'
+import datetime as dt, sys
+now = dt.datetime.now(dt.timezone.utc); out = []
+for tier, days in (("hourly", 3), ("daily", 90), ("monthly", 365), ("safety", 30)):
+    for label, age in (("keep", dt.timedelta(days=days + 2) - dt.timedelta(hours=1)), ("drop", dt.timedelta(days=days + 2, hours=1))):
+        out.append("db/%s/app-%s-%s.dump\tx\tv1\t%s" % (tier, label, tier, (now - age).strftime("%Y-%m-%dT%H:%M:%SZ")))
+open(sys.argv[1], "w").write("\n".join(out) + "\n")
+PY
 FAKE_DUMP=two name=$(bash "$H/edh-backup.sh" --tag manual 2>/dev/null)
-assert_eq "$(wc -l < "$M" | tr -d ' ')" "2000" "manifest rotated to the newest 2000 lines"
-assert_eq "$(tail -1 "$M" | cut -f1)" "db/daily/$name" "rotation keeps the new entry"
+kept=$(cut -f1 "$M" | sed -nE 's#^db/[a-z]+/app-(keep|drop)-([a-z]+)\.dump$#\1-\2#p' | tr '\n' ' ')
+assert_eq "$kept" "keep-hourly keep-daily keep-monthly keep-safety " "manifest drops entries older than their tier's retention + 2 days"
+assert_eq "$(tail -1 "$M" | cut -f1)" "db/daily/$name" "trimming keeps the new entry"
+assert_eq "$(mode "$M")" "600" "trimmed manifest is still 0600"
+
+# ============ pick: the newest manifest backup (for a day, by upload date), from the manifest alone
+cp "$M" "$T/manifest.save"
+printf '%s\n' "db/hourly/app-20261029T230000Z.dump	aa	v1	2026-10-29T23:00:04Z" \
+  "db/daily/app-20261029T235900Z.dump	bb	v1	2026-10-30T00:01:10Z" "db/hourly/app-20261030T010000Z.dump	cc	v1	2026-10-30T01:00:03Z" > "$M"
+: > "$STUB_LOG"
+assert_eq "$(bash "$H/edh-restore.sh" pick 2>/dev/null)" "db/hourly/app-20261030T010000Z.dump	2026-10-30T01:00:03Z" "pick: the newest backup"
+assert_eq "$(bash "$H/edh-restore.sh" pick 20261030 2>/dev/null)" "db/hourly/app-20261030T010000Z.dump	2026-10-30T01:00:03Z" "pick <day>: newest of that day"
+assert_eq "$(bash "$H/edh-restore.sh" pick 20261029 2>/dev/null)" "db/hourly/app-20261029T230000Z.dump	2026-10-29T23:00:04Z" \
+  "pick <day>: by upload date (a dump named on the 29th but uploaded on the 30th counts for the 30th)"
+assert_eq "$(bash "$H/edh-restore.sh" pick 20261028 2>/dev/null; echo "rc=$?")" "rc=0" "pick <day> without a backup: nothing"
+out=$(bash "$H/edh-restore.sh" pick 2026-10-29 2>&1); rc=$?
+assert_status $rc 1 "pick refuses a malformed day"
+assert_eq "$(grep -c . "$STUB_LOG")" "0" "pick makes no AWS call"
+cp "$T/manifest.save" "$M"
 
 # ============ restore: a manifest key is fetched by its version and its sha256 checked
 : > "$STUB_LOG"
@@ -69,8 +97,10 @@ mkdir -p "$T/s3/bkt/db/daily"; cp "$T/data/backups/$name" "$T/s3/bkt/$planted"
 out=$(restore check "$planted"); rc=$?
 assert_status $rc 1 "a key not in the manifest is refused"
 assert_contains "$out" "backup $planted is not in this server's backup manifest" "refusal names the key"
-assert_contains "$out" "Re-run with --unverified only if you are sure" "refusal mentions --unverified"
+assert_contains "$out" "If the server was rebuilt and the manifest lost, see references/backup-restore.md before using --unverified" \
+  "refusal points at the docs before --unverified"
 assert_eq "$(grep -c get-object "$STUB_LOG")" "0" "refused key is not downloaded"
+assert_eq "$(alerted 'restore refused')" "yes" "a key not in the manifest alerts in check mode too (a tamper signal)"
 : > "$STUB_LOG"
 out=$(restore check "$planted" --unverified); rc=$?
 assert_status $rc 0 "--unverified restores a key that is not in the manifest"

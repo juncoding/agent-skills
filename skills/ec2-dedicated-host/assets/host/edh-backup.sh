@@ -7,8 +7,8 @@
 #            alarm fires when it stops.
 #   safety : before deploys/restores → db/safety/ (kept 30 days)
 #   manual : on demand → db/daily/
-# Every upload is recorded in the manifest ($EDH_MANIFEST: key, sha256, S3 VersionId, time; newest 2000 lines),
-# which restores verify against. The newest 24 dumps are kept locally. The server can create backups but never
+# Every upload is recorded in the manifest ($EDH_MANIFEST: key, sha256, S3 VersionId, time), which restores
+# verify against; entries go once S3 no longer keeps the object. The newest 24 dumps are kept locally. The server can create backups but never
 # overwrite or delete them in S3; lifecycle rules expire them.
 # Prints the dump's file name. Any failure sends an alert.
 # shellcheck source-path=SCRIPTDIR source=edh-lib.sh
@@ -78,6 +78,34 @@ sha=$(sha256_of "$file")
 [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || die "could not checksum $file"
 
 uploaded=0
+# days S3 keeps each tier (Expiration Days in backups-lifecycle.json; a test keeps the two in step)
+RETAIN_DAYS="hourly:3 daily:90 monthly:365 safety:30"
+# trim_manifest — drop entries for objects S3 has expired: older than their tier's retention plus a 2-day margin.
+# Lines it can't judge stay. Rewritten (0600) only when something is dropped.
+trim_manifest() {
+  [[ -f "$EDH_MANIFEST" ]] || return 0
+  python3 -I -c 'import datetime as dt, os, sys
+path, spec = sys.argv[1], sys.argv[2]
+keep = dict((k, int(v)) for k, v in (x.split(":") for x in spec.split()))
+now = dt.datetime.now(dt.timezone.utc)
+lines = open(path).read().splitlines(True)
+out = []
+for line in lines:
+    f = line.rstrip("\n").split("\t")
+    try:
+        tier = f[0].split("/")[1]
+        t = dt.datetime.strptime(f[3], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    except (IndexError, ValueError):
+        out.append(line); continue
+    if tier in keep and now - t > dt.timedelta(days=keep[tier] + 2):
+        continue
+    out.append(line)
+if len(out) != len(lines):
+    tmp = path + ".new"
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+        fh.write("".join(out))
+    os.replace(tmp, path)' "$EDH_MANIFEST" "$RETAIN_DAYS" || die "could not trim $EDH_MANIFEST"
+}
 # upload <prefix> — create-only (--if-none-match '*'): the host policy allows nothing else, so the server can
 # never overwrite a backup (which would push the genuine one into a noncurrent version).
 # A single PUT is limited to 5 GB, which is fine for the dump sizes we target, and 5 GB is a HARD ceiling for
@@ -103,10 +131,7 @@ case "$TAG" in
   manual) upload daily ;;
 esac
 if (( uploaded )); then touch "$EDH_DATA_DIR/backups/.last_upload"; fi   # freshness = last successful upload
-# the manifest keeps the newest 2000 uploads (far more than the lifecycle rules keep in S3)
-if [[ -f "$EDH_MANIFEST" ]] && (( $(wc -l < "$EDH_MANIFEST") > 2000 )); then
-  tail -n 2000 "$EDH_MANIFEST" > "$EDH_MANIFEST.new" && mv -f "$EDH_MANIFEST.new" "$EDH_MANIFEST"
-fi
+trim_manifest
 # keep the newest 24 local dumps
 ls -1t "$EDH_DATA_DIR"/backups/app-*.dump | tail -n +25 | while read -r old; do rm -f "$old"; done
 if [[ "$TAG" == auto ]]; then heartbeat; fi

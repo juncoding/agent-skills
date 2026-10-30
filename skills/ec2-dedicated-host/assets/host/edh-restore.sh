@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# edh-restore.sh pick [YYYYMMDD]   print "<key><TAB><upload time>" of the newest backup in the manifest (uploaded that day)
 # edh-restore.sh check <s3-key> [--keep] [--unverified]   restore into side database app_restore_check, count tables, drop it
 # edh-restore.sh replace <s3-key> --yes [--unverified]    replace the live database:
 #     validate the dump → restore it into app_restore_new (the app keeps serving) → maintenance on → safety dump
@@ -37,7 +38,11 @@ fetch() {
         --expected-bucket-owner "$EDH_ACCOUNT_ID" --region "$EDH_REGION" "$f" >/dev/null ) \
       || die "could not download $1"
   else
-    die "backup $1 is not in this server's backup manifest — it was not made by this server's backup job (or the manifest was lost). Re-run with --unverified only if you are sure."
+    # an object under db/ that this server's backup job didn't make is a tamper signal: alert (replace alerts on exit)
+    if [[ "$cmd" == check ]]; then
+      alert "restore refused: backup not in manifest" "edh-restore.sh check was asked for $1, which is not in this server's backup manifest: something other than this server's backup job may have uploaded it."
+    fi
+    die "backup $1 is not in this server's backup manifest. If the server was rebuilt and the manifest lost, see references/backup-restore.md before using --unverified."
   fi
   printf '%s' "$f"
 }
@@ -54,6 +59,18 @@ restore_into() { # restore_into <database> <dump-file>
   dc exec -T postgres pg_restore -U app -d "$1" --no-owner --exit-on-error < "$2"
 }
 table_count() { pg "select count(*) from information_schema.tables where table_schema not in ('pg_catalog','information_schema')" "$1"; }
+
+# pick — read-only, from the manifest alone (no lock, no AWS call): what --latest / --date restore
+if [[ "${1:-}" == pick ]]; then
+  day="${2:-}"; d=""
+  [[ -z "$day" || "$day" =~ ^[0-9]{8}$ ]] || die "usage: edh-restore.sh pick [YYYYMMDD]"
+  if [[ -n "$day" ]]; then d="${day:0:4}-${day:4:2}-${day:6:2}"; fi
+  [[ -f "$EDH_MANIFEST" ]] || exit 0
+  # the manifest is in upload order: the last match is the newest
+  awk -F'\t' -v d="$d" '$1 ~ /^db\/(hourly|daily|monthly|safety)\/app-[0-9]+T[0-9]+Z\.dump$/ && (d == "" || substr($4, 1, 10) == d) { k = $1; t = $4 }
+    END { if (k != "") print k "\t" t }' "$EDH_MANIFEST"
+  exit 0
+fi
 
 cmd="${1:-}"; key="${2:-}"; keep=0; yes=0
 [[ -n "$key" ]] || die "usage: edh-restore.sh check|replace <s3-key> [--keep|--yes] [--unverified]"

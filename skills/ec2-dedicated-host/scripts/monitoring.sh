@@ -10,19 +10,22 @@ case "$cmd" in add|remove) require_account ;; esac   # status is read-only
 ACCT=$(aws_account)
 TOPIC="${EDH_PREFIX}-alerts"
 ROLE="${EDH_PREFIX}-host"
-REF="${EDH_PREFIX}-site"     # Route 53 CallerReference (idempotency key)
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 
 topic_arn() { printf 'arn:aws:sns:%s:%s:%s' "$1" "$ACCT" "$TOPIC"; }
 
-ensure_topic() { # ensure_topic <region>
-  local arn e subs
+ensure_topic() { # ensure_topic <region> — the topic, and an email subscription per address (pending ones reported)
+  local arn e subs sub
   arn=$(aws --region "$1" sns create-topic --name "$TOPIC" --tags "Key=edh:client,Value=$EDH_CLIENT" --query TopicArn --output text)
-  subs=$(aws --region "$1" sns list-subscriptions-by-topic --topic-arn "$arn" --query 'Subscriptions[].Endpoint' --output text)
+  subs=$(aws --region "$1" sns list-subscriptions-by-topic --topic-arn "$arn" \
+    --query 'Subscriptions[].[Endpoint,SubscriptionArn]' --output text)
   for e in $(printf '%s' "$EDH_ALERT_EMAILS" | tr ',' ' '); do
-    if [[ " $(printf '%s' "$subs" | tr '\t' ' ') " != *" $e "* ]]; then
+    sub=$(printf '%s\n' "$subs" | awk -F'\t' -v e="$e" '$1 == e { print $2; exit }')
+    if [[ -z "$sub" ]]; then
       aws --region "$1" sns subscribe --topic-arn "$arn" --protocol email --notification-endpoint "$e" >/dev/null
       warn "$e: AWS sent a 'Subscription Confirmation' email ($1) — click the link to receive alerts"
+    elif [[ "$sub" == PendingConfirmation ]]; then
+      warn "$e has not confirmed the alert subscription ($1) yet — check that inbox (and spam) for the AWS confirmation email"
     fi
   done
 }
@@ -37,8 +40,54 @@ alarm() {
     --alarm-actions "$arn" --ok-actions "$arn"
 }
 
-health_check_id() {
-  aws route53 list-health-checks --query "HealthChecks[?CallerReference=='$REF'].Id | [0]" --output text
+# our_health_checks — this client's Route 53 health checks, "id<TAB>domain<TAB>path" per line: found by their
+# edh:client / edh:env tags, never by caller reference (Route 53 never lets a reference be reused, even after the
+# check is deleted, so every create gets a new one).
+our_health_checks() {
+  local all ids tags line id
+  all=$(aws route53 list-health-checks \
+    --query 'HealthChecks[].[Id,HealthCheckConfig.FullyQualifiedDomainName,HealthCheckConfig.ResourcePath]' --output text) \
+    || die "cannot list the Route 53 health checks"
+  all=$(printf '%s\n' "$all" | grep -v -e '^None$' -e '^$' || true)
+  [[ -n "$all" ]] || return 0
+  ids=$(printf '%s\n' "$all" | cut -f1)
+  tags=""
+  # shellcheck disable=SC2086  # ids are Route 53 ids (no spaces)
+  set -- $ids
+  while (( $# > 0 )); do   # at most 10 ids per call
+    line=$(aws route53 list-tags-for-resources --resource-type healthcheck --resource-ids "${@:1:10}" \
+      --query 'ResourceTagSets[].[ResourceId,Tags[?Key==`edh:client`]|[0].Value,Tags[?Key==`edh:env`]|[0].Value]' --output text) \
+      || die "cannot read the tags of the Route 53 health checks"
+    tags="$tags$line"$'\n'
+    if (( $# > 10 )); then shift 10; else shift $#; fi
+  done
+  for id in $(printf '%s' "$tags" | awk -F'\t' -v c="$EDH_CLIENT" -v e="$EDH_ENV" '$2 == c && $3 == e { print $1 }'); do
+    printf '%s\n' "$all" | awk -F'\t' -v i="$id" '$1 == i'
+  done
+}
+
+# ensure_health_check — HC = this client's check of https://<domain>/health, created if missing. This client's
+# checks for anything else (the domain changed) are deleted.
+ensure_health_check() {
+  local rows id d p ref
+  HC=""
+  rows=$(our_health_checks)
+  while IFS=$'\t' read -r id d p <&3; do
+    [[ -n "$id" ]] || continue
+    if [[ -z "$HC" && "$d" == "$EDH_DOMAIN" && "$p" == /health ]]; then HC="$id"; continue; fi
+    warn "deleting Route 53 health check $id for https://$d$p (this client's, but not https://$EDH_DOMAIN/health — the domain changed?)"
+    aws route53 delete-health-check --health-check-id "$id"
+  done 3<<< "$rows"
+  if [[ -z "$HC" ]]; then
+    ref="${EDH_PREFIX}-site-$(date +%s)-$(gen_secret 8)"   # unique: a reference can never be used twice
+    HC=$(aws route53 create-health-check --caller-reference "$ref" --health-check-config \
+      "Type=HTTPS,FullyQualifiedDomainName=$EDH_DOMAIN,Port=443,ResourcePath=/health,RequestInterval=30,FailureThreshold=3,EnableSNI=true" \
+      --query HealthCheck.Id --output text) || die "could not create the Route 53 health check for https://$EDH_DOMAIN/health"
+    [[ -n "$HC" && "$HC" != None ]] || die "could not create the Route 53 health check for https://$EDH_DOMAIN/health"
+    ok "Route 53 health check $HC created for https://$EDH_DOMAIN/health"
+  fi
+  aws route53 change-tags-for-resource --resource-type healthcheck --resource-id "$HC" --add-tags "Key=Name,Value=$EDH_PREFIX" \
+    "Key=edh:client,Value=$EDH_CLIENT" "Key=edh:env,Value=$EDH_ENV" "Key=Client,Value=$EDH_CLIENT" "Key=ManagedBy,Value=ec2-dedicated-host" >/dev/null
 }
 
 # The agent may publish only into this client's namespace CWAgent/<name> (inline policy edh-cwagent). Never the
@@ -66,7 +115,7 @@ CWAEOF
 }
 
 add() {
-  local r type disk_dims hc p
+  local r type disk_dims p
   require_instance
   log "monitoring for $EDH_NAME → $EDH_ALERT_EMAILS"
   ensure_topic "$EDH_REGION"
@@ -92,17 +141,13 @@ add() {
   # window (hourly or daily alike), so the alarm is the same for every schedule
   alarm "$r" backup-stale "Backups are not up to date" "EDH/$EDH_NAME" BackupFresh "Name=Client,Value=$EDH_CLIENT Name=Env,Value=$EDH_ENV" Sum 3600 2 1 LessThanThreshold breaching
 
-  aws route53 create-health-check --caller-reference "$REF" --health-check-config \
-    "Type=HTTPS,FullyQualifiedDomainName=$EDH_DOMAIN,Port=443,ResourcePath=/health,RequestInterval=30,FailureThreshold=3,EnableSNI=true" >/dev/null 2>&1 || true
-  hc=$(health_check_id)
-  [[ -n "$hc" && "$hc" != None ]] || die "could not create or find the Route 53 health check"
-  aws route53 change-tags-for-resource --resource-type healthcheck --resource-id "$hc" --add-tags "Key=Name,Value=$EDH_PREFIX" "Key=edh:client,Value=$EDH_CLIENT" >/dev/null
-  alarm us-east-1 site-down "https://$EDH_DOMAIN/health failing from outside" AWS/Route53 HealthCheckStatus "Name=HealthCheckId,Value=$hc" Minimum 60 1 1 LessThanThreshold breaching
+  ensure_health_check
+  alarm us-east-1 site-down "https://$EDH_DOMAIN/health failing from outside" AWS/Route53 HealthCheckStatus "Name=HealthCheckId,Value=$HC" Minimum 60 1 1 LessThanThreshold breaching
   ok "monitoring on (about \$4/month). Alerts and recoveries are emailed to $EDH_ALERT_EMAILS"
 }
 
 remove() {
-  local hc iid
+  local id iid
   confirm "Remove all monitoring for $EDH_NAME (alarms, health check, alert emails)?"
   # exact names (alarm_names), never a prefix: edh-acme-prod- also starts client acme-prod's alarm names.
   # Deleting an alarm that doesn't exist is not an error.
@@ -112,8 +157,7 @@ remove() {
   aws_use1 cloudwatch delete-alarms --alarm-names $(alarm_names global)
   awsr sns delete-topic --topic-arn "$(topic_arn "$EDH_REGION")" || true
   if [[ "$EDH_REGION" != us-east-1 ]]; then aws_use1 sns delete-topic --topic-arn "$(topic_arn us-east-1)" || true; fi
-  hc=$(health_check_id)
-  if [[ -n "$hc" && "$hc" != None ]]; then aws route53 delete-health-check --health-check-id "$hc"; fi
+  for id in $(our_health_checks | cut -f1); do aws route53 delete-health-check --health-check-id "$id"; done
   iid=$(instance_id) || iid=""
   if [[ "${EDH_SKIP_SSM:-}" != 1 && -n "$iid" && "$iid" != None && "$iid" != *[[:space:]]* ]]; then
     ssm_run "$iid" 120 '/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a stop || true' >/dev/null \

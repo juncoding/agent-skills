@@ -76,6 +76,58 @@ assert_not_contains "$s" "__NAME__" "agent config is rendered"
 assert_contains "$s" '${aws:InstanceId}' "agent config keeps the agent's own \${aws:InstanceId} placeholder"
 assert_not_contains "$s" "get-parameter" "agent install reads no secrets"
 
+# ============ Route 53 health check: found by domain, path and this client's tags — never by caller reference,
+# which Route 53 refuses to reuse even after the check is deleted
+rm -f "$T/log.r53"*; : > "$T/log"
+out=$(mon add); rc=$?
+assert_status $rc 0 "add creates the health check"
+assert_eq "$(cut -f2- "$T/log.r53")" "app.example.com	/health	acme	prod" "health check: domain, /health, tagged edh:client and edh:env"
+hc=$(cut -f1 "$T/log.r53")
+assert_contains "$(grep put-metric-alarm "$T/log" | grep site-down)" "Name=HealthCheckId,Value=$hc" "site-down alarm watches the health check"
+: > "$T/log"
+out=$(mon add); rc=$?
+assert_eq "$(grep -c create-health-check "$T/log")" "0" "add again: the existing health check is reused"
+mon remove >/dev/null
+assert_eq "$(grep -c . "$T/log.r53")" "0" "remove deletes the health check"
+: > "$T/log"
+out=$(mon add); rc=$?
+assert_status $rc 0 "add after remove succeeds (a new caller reference)"
+assert_eq "$(grep -c . "$T/log.r53")" "1" "add after remove: one health check"
+# another client's check for the same domain is neither reused nor deleted
+printf 'hc-99\tapp.example.com\t/health\tother\tprod\n' >> "$T/log.r53"
+: > "$T/log"
+out=$(mon add); rc=$?
+assert_eq "$(grep -c 'hc-99' "$T/log.r53")" "1" "another client's health check is left alone"
+assert_not_contains "$(grep put-metric-alarm "$T/log" | grep site-down)" "hc-99" "another client's health check is not used"
+# domain changed: this client's old check is replaced
+old_hc=$(awk -F'\t' '$4 == "acme" { print $1 }' "$T/log.r53")
+sed 's/^domain: .*/domain: new.example.com/' "$SKILL_DIR/assets/project/deploy.yml" > deploy/deploy.yml
+: > "$T/log"
+out=$(mon add); rc=$?
+assert_status $rc 0 "domain change: add succeeds"
+assert_contains "$out" "app.example.com" "domain change: says which check is replaced"
+assert_contains "$(cat "$T/log")" "delete-health-check --health-check-id $old_hc" "domain change: the old check is deleted"
+assert_eq "$(awk -F'\t' '$4 == "acme" { print $2 }' "$T/log.r53")" "new.example.com" "domain change: one check, for the new domain"
+cp "$SKILL_DIR/assets/project/deploy.yml" deploy/deploy.yml
+# a failing create is not swallowed
+rm -f "$T/log.r53"*
+out=$(STUB_R53_FAIL=1 mon add); rc=$?
+assert_status $rc 1 "a failing health check create fails add"
+assert_contains "$out" "could not create the Route 53 health check" "a failing health check create: explained"
+
+# ============ alert emails: unconfirmed subscriptions are reported, not subscribed again
+: > "$T/log"
+out=$(STUB_SNS_SUBS="ops@example.com	PendingConfirmation" mon add); rc=$?
+assert_contains "$out" "ops@example.com has not confirmed" "a pending subscription is reported"
+assert_eq "$(grep -c 'sns subscribe' "$T/log")" "0" "a pending subscription is not subscribed again"
+: > "$T/log"
+out=$(STUB_SNS_SUBS="ops@example.com	arn:aws:sns:ap-southeast-1:123456789012:edh-acme-prod-alerts:1234" mon add); rc=$?
+assert_not_contains "$out" "has not confirmed" "a confirmed subscription is not reported"
+assert_eq "$(grep -c 'sns subscribe' "$T/log")" "0" "a confirmed subscription is not subscribed again"
+: > "$T/log"
+out=$(mon add); rc=$?
+assert_eq "$(grep -c 'sns subscribe' "$T/log")" "2" "a new address is subscribed (app region and us-east-1)"
+
 # ============ status is read-only; add/remove refuse another account
 : > "$T/log"
 out=$(STUB_READONLY=1 mon status); rc=$?

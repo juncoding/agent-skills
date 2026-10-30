@@ -186,74 +186,115 @@ open(sys.argv[1], "w").write("".join("%s\t%s\t%d\n" % (k, iso(t), n) for k, t, n
 print(a, b, c, d, x.strftime("%Y-%m-%d"), (x + h).strftime("%Y-%m-%d"))
 PY
 )
-export STUB_S3_LIST="$T/objects"
+# --latest / --date: the server picks from its own backup manifest (edh-restore.sh pick); the bucket is not listed
 : > "$T/log"
-out=$(run restore.sh db --latest --check); rc=$?
+out=$(STUB_SSM_OUT="db/hourly/app-20261030T010000Z.dump	2026-10-30T01:00:05Z" run restore.sh db --latest --check); rc=$?
 assert_status $rc 0 "restore --latest --check succeeds"
-assert_contains "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_B --keep" "restore --latest: the newest genuine upload wins"
-assert_contains "$out" "skipping $KEY_C" "restore: a future-named key is skipped"
-assert_contains "$out" "$KEY_C: its name is dated in the future" "restore: future-named key: explained"
-assert_contains "$out" "skipping $KEY_D" "restore: a key whose name doesn't match its upload time is skipped"
-assert_contains "$out" "backup $KEY_B" "restore prints the chosen key"
-assert_contains "$out" "3000 bytes" "restore prints the chosen dump's size"
-assert_contains "$(grep list-objects-v2 "$T/log")" "--expected-bucket-owner 123456789012" "restore lists backups only in this account's bucket"
+assert_eq "$(script_n 1)" "/opt/edh/bin/edh-restore.sh pick" "restore --latest asks the server's manifest"
+assert_eq "$(script_n 2)" "/opt/edh/bin/edh-restore.sh check db/hourly/app-20261030T010000Z.dump --keep" "restore --latest restores the manifest's newest"
+assert_contains "$out" "backup db/hourly/app-20261030T010000Z.dump — uploaded 2026-10-30T01:00:05Z" "restore prints the chosen key and its upload time"
+assert_eq "$(calls list-objects-v2)" "0" "restore --latest does not list the bucket"
 : > "$T/log"
-out=$(EDH_YES=1 run restore.sh db --latest); rc=$?
-assert_status $rc 0 "restore --latest (replace) succeeds"
-assert_contains "$(script_n 1)" "/opt/edh/bin/edh-restore.sh replace $KEY_B --yes" "restore --latest replaces with the newest genuine dump"
+out=$(EDH_YES=1 STUB_SSM_OUT="db/daily/app-20261029T180000Z.dump	2026-10-29T18:00:09Z" run restore.sh db --date 2026-10-29); rc=$?
+assert_eq "$(script_n 1)" "/opt/edh/bin/edh-restore.sh pick 20261029" "restore --date asks the manifest for that day"
+assert_eq "$(script_n 2)" "/opt/edh/bin/edh-restore.sh replace db/daily/app-20261029T180000Z.dump --yes" "restore --date replaces with that day's backup"
 : > "$T/log"
-out=$(run restore.sh db --date "$DATE_X1" --check); rc=$?
-assert_contains "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_A --keep" "restore --date matches on the upload date"
+out=$(STUB_SSM_OUT="" run restore.sh db --date 2026-01-01 --check); rc=$?
+assert_status $rc 1 "restore --date without a backup that day fails"
+assert_contains "$out" "no matching backup found" "restore --date without a backup that day: explained"
+assert_eq "$(calls 'ssm send-command')" "1" "restore --date without a match: nothing restored"
 : > "$T/log"
-out=$(run restore.sh db --date "$DATE_X" --check); rc=$?
-assert_status $rc 1 "restore --date of the name's day (not the upload's): nothing"
-assert_contains "$out" "no matching backup found" "restore --date without an upload that day: explained"
-assert_eq "$(calls 'ssm send-command')" "0" "restore --date without a match: nothing sent"
+out=$(STUB_SSM_OUT="db/daily/x; reboot	2026-10-29T18:00:09Z" run restore.sh db --latest --check); rc=$?
+assert_status $rc 1 "a malformed key from the server is refused"
+assert_eq "$(calls 'ssm send-command')" "1" "a malformed key from the server: nothing restored"
+# --key: the server verifies it against its manifest; nothing is listed here
 : > "$T/log"
-out=$(EDH_YES=1 run restore.sh db --key "$KEY_C"); rc=$?
-assert_status $rc 1 "restore --key of a future-named dump refused"
-assert_eq "$(calls 'ssm send-command')" "0" "restore --key of a future-named dump: nothing sent"
-: > "$T/log"
-out=$(run restore.sh db --key "$KEY_A" --check); rc=$?
-assert_contains "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_A --keep" "restore --key of a genuine dump"
+out=$(run restore.sh db --key "$KEY_C" --check); rc=$?
+assert_eq "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_C --keep" "restore --key goes to the server, which verifies it"
+assert_eq "$(calls list-objects-v2)" "0" "restore --key does not list the bucket"
 : > "$T/log"
 out=$(EDH_YES=1 run restore.sh db --key 'db/daily/app-20261029T180000Z.dump; reboot'); rc=$?
 assert_status $rc 1 "restore --key with shell syntax refused"
 assert_eq "$(calls 'ssm send-command')" "0" "restore --key with shell syntax: nothing sent"
-# --unverified is passed through to the server (which then restores a key missing from its backup manifest)
-: > "$T/log"
-out=$(EDH_YES=1 run restore.sh db --key "$KEY_A" --unverified); rc=$?
-assert_contains "$(script_n 1)" "/opt/edh/bin/edh-restore.sh replace $KEY_A --yes --unverified" "--unverified passed through (replace)"
-assert_contains "$out" "--unverified" "--unverified is warned about before the confirmation"
-: > "$T/log"
-out=$(run restore.sh db --key "$KEY_A" --check --unverified); rc=$?
-assert_contains "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_A --keep --unverified" "--unverified passed through (check)"
-: > "$T/log"
-out=$(EDH_YES=1 run restore.sh db --key "$KEY_A"); rc=$?
-assert_not_contains "$(script_n 1)" "--unverified" "without --unverified the server verifies against its manifest"
-out=$(EDH_YES=1 STUB_SSM_RC=1 run restore.sh db --latest); rc=$?
+out=$(EDH_YES=1 STUB_SSM_RC=1 run restore.sh db --key "$KEY_A"); rc=$?
 assert_status $rc 1 "edh-restore failure: restore fails"
 assert_contains "$out" "failed" "edh-restore failure: explained"
+
+# --unverified: chosen from the bucket listing by S3 upload time (LastModified), never by the name's timestamp —
+# the host role (and an app container using it) can upload any key under db/, e.g. app-29991231T000000Z.dump
+export STUB_S3_LIST="$T/objects"
+: > "$T/log"
+out=$(run restore.sh db --latest --check --unverified); rc=$?
+assert_status $rc 0 "restore --latest --unverified succeeds"
+assert_eq "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_B --keep --unverified" "--unverified --latest: the newest genuine upload wins"
+assert_contains "$out" "skipping $KEY_C" "--unverified: a future-named key is skipped"
+assert_contains "$out" "$KEY_C: its name is dated in the future" "--unverified: future-named key: explained"
+assert_contains "$out" "skipping $KEY_D" "--unverified: a key whose name doesn't match its upload time is skipped"
+assert_contains "$out" "backup $KEY_B" "--unverified: prints the chosen key"
+assert_contains "$out" "3000 bytes" "--unverified: prints the chosen dump's size"
+assert_contains "$(grep list-objects-v2 "$T/log")" "--expected-bucket-owner 123456789012" "--unverified lists only this account's bucket"
+: > "$T/log"
+out=$(EDH_YES=1 run restore.sh db --latest --unverified); rc=$?
+assert_eq "$(script_n 1)" "/opt/edh/bin/edh-restore.sh replace $KEY_B --yes --unverified" "--unverified passed through (replace)"
+assert_contains "$out" "--unverified" "--unverified is warned about before the confirmation"
+: > "$T/log"
+out=$(run restore.sh db --date "$DATE_X1" --check --unverified); rc=$?
+assert_eq "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_A --keep --unverified" "--unverified --date matches on the upload date"
+: > "$T/log"
+out=$(run restore.sh db --date "$DATE_X" --check --unverified); rc=$?
+assert_status $rc 1 "--unverified --date of the name's day (not the upload's): nothing"
+assert_eq "$(calls 'ssm send-command')" "0" "--unverified --date without a match: nothing sent"
+: > "$T/log"
+out=$(EDH_YES=1 run restore.sh db --key "$KEY_C" --unverified); rc=$?
+assert_status $rc 1 "--unverified --key of a future-named dump refused"
+assert_eq "$(calls 'ssm send-command')" "0" "--unverified --key of a future-named dump: nothing sent"
+: > "$T/log"
+out=$(run restore.sh db --key "$KEY_A" --check --unverified); rc=$?
+assert_eq "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_A --keep --unverified" "--unverified --key of a genuine dump"
+# python3 must really run (on a Mac without the Command Line Tools, python3 is only a stub)
+mkdir -p "$T/nopy"; printf '#!/bin/sh\necho "xcode-select: note: no developer tools were found" >&2\nexit 1\n' > "$T/nopy/python3"; chmod +x "$T/nopy/python3"
+: > "$T/log"
+out=$(PATH="$T/nopy:$PATH" run restore.sh db --latest --check --unverified); rc=$?
+assert_status $rc 1 "--unverified without a working python3 fails"
+assert_contains "$out" "python3" "--unverified without a working python3: explained"
+assert_eq "$(calls 'ssm send-command')" "0" "--unverified without a working python3: nothing sent"
 unset STUB_S3_LIST
 
-# ============ restore disk: stop app, timers, docker (RequiresMountsFor=/data) → umount → swap → mount → start
+# ============ restore disk: only this client's snapshots; lock, timers, app, docker (RequiresMountsFor=/data)
+# stopped → umount → swap → mount → start
 : > "$T/log"
 out=$(EDH_YES=1 STUB_VOL_ATTACHED=i-stub run restore.sh disk --snapshot snap-0123abcd); rc=$?
 assert_status $rc 0 "restore disk succeeds"
-assert_eq "$(in_order "$(script_n 1)" "docker compose down" "systemctl stop edh-backup.timer edh-drill.timer" \
-  "systemctl stop docker.socket docker" "umount /data")" ok "restore disk: compose down, timers, docker stopped, then umount"
-assert_eq "$(in_order "$(script_n 2)" "mount -a && mountpoint -q /data" "systemctl start docker" "docker compose up -d" \
-  "systemctl start edh-backup.timer edh-drill.timer" "wait_health")" ok "restore disk: mount, docker, compose up, timers, health check"
+assert_eq "$(in_order "$(script_n 1)" "systemctl stop edh-backup.timer edh-drill.timer" "edh_lock" "docker compose down" \
+  "systemctl stop docker.socket docker" "umount /data")" ok "restore disk: timers, the edh lock, compose down, docker, then umount"
+assert_eq "$(in_order "$(script_n 2)" "mount -a || true" "mountpoint -q /data || { echo '/data not mounted'; exit 1; }" \
+  "systemctl start docker" "docker compose up -d" "systemctl start edh-backup.timer edh-drill.timer" "wait_health")" ok \
+  "restore disk: mount (checked), docker, compose up, timers, health check"
 s1=$(line_of 'ssm send-command' 1); s2=$(line_of 'ssm send-command' 2)
 d=$(line_of 'detach-volume --volume-id vol-stub'); a=$(line_of 'attach-volume')
 assert_eq "$(( s1 < d && d < a && a < s2 ))" "1" "restore disk: volumes are swapped between unmount and mount"
+assert_contains "$(cat "$T/log")" "describe-snapshots --snapshot-ids snap-0123abcd" "restore disk: the snapshot's tags are checked"
 assert_contains "$(grep create-volume "$T/log")" "--snapshot-id snap-0123abcd" "restore disk: new volume from the snapshot"
 assert_contains "$(grep create-volume "$T/log")" "{Key=edh:role,Value=data-restoring},{Key=Protect,Value=true}" \
   "restore disk: new volume is protected and not yet tagged as the data volume"
 assert_contains "$(cat "$T/log")" "create-tags --resources vol-stub --tags Key=edh:role,Value=data-replaced-" "restore disk: old volume re-tagged"
-assert_contains "$(cat "$T/log")" "create-tags --resources stub --tags Key=edh:role,Value=data Key=edh:snapshot,Value=acme-prod" \
+assert_contains "$(cat "$T/log")" "create-tags --resources vol-new --tags Key=edh:role,Value=data Key=edh:snapshot,Value=acme-prod" \
   "restore disk: new volume becomes the data volume"
 assert_eq "$(calls delete-volume)" "0" "restore disk never deletes a volume"
+for tags in "other	prod" "acme	staging" "None	None"; do
+  : > "$T/log"
+  out=$(EDH_YES=1 STUB_VOL_ATTACHED=i-stub STUB_SNAP_TAGS="$tags" run restore.sh disk --snapshot snap-0123abcd); rc=$?
+  assert_status $rc 1 "restore disk: snapshot tagged '$tags' refused"
+  assert_contains "$out" "--foreign-snapshot" "restore disk: snapshot tagged '$tags': explained"
+  assert_eq "$(calls create-volume)" "0" "restore disk: snapshot tagged '$tags': nothing created"
+done
+: > "$T/log"
+out=$(EDH_YES=1 STUB_VOL_ATTACHED=i-stub STUB_SNAP_TAGS="other	prod" run restore.sh disk --snapshot snap-0123abcd --foreign-snapshot); rc=$?
+assert_status $rc 0 "restore disk --foreign-snapshot uses another client's snapshot"
+assert_contains "$out" "not tagged as $(printf 'acme-prod')" "restore disk --foreign-snapshot: warned"
+: > "$T/log"
+out=$(STUB_VOL_ATTACHED=i-stub STUB_SNAP_TAGS="other	prod" run restore.sh disk --snapshot snap-0123abcd --foreign-snapshot </dev/null); rc=$?
+assert_eq "$(calls create-volume)" "0" "restore disk --foreign-snapshot still needs consent"
 : > "$T/log"
 out=$(EDH_YES=1 run restore.sh disk --snapshot snap-0123abcd); rc=$?
 assert_status $rc 1 "restore disk: data volume not attached to the server: refuses"
@@ -264,6 +305,18 @@ assert_status $rc 1 "restore disk: unmount fails: stops"
 assert_contains "$out" "nothing was swapped" "restore disk: unmount fails: explained"
 assert_eq "$(calls detach-volume)" "0" "restore disk: unmount fails: old volume stays attached"
 assert_contains "$(script_n 2)" "systemctl start docker" "restore disk: unmount fails: the app is started again"
+# a failure after the unmount prints both volumes and how to put the old one back
+: > "$T/log"
+out=$(EDH_YES=1 STUB_VOL_ATTACHED=i-stub STUB_ATTACH_FAIL=1 run restore.sh disk --snapshot snap-0123abcd); rc=$?
+assert_eq "$(( rc != 0 ))" "1" "restore disk: attach fails: stops"
+assert_contains "$(cat "$T/log")" "describe-volumes --volume-ids vol-stub vol-new" "restore disk: attach fails: both volumes' state shown"
+assert_contains "$out" "old data volume: vol-stub" "restore disk: attach fails: names the old volume"
+assert_contains "$out" "new volume:      vol-new" "restore disk: attach fails: names the new volume"
+assert_contains "$out" "aws --region ap-southeast-1 ec2 attach-volume --volume-id vol-stub --instance-id i-stub --device /dev/sdf" \
+  "restore disk: attach fails: the command to re-attach the old volume"
+assert_contains "$out" "aws --region ap-southeast-1 ec2 create-tags --resources vol-stub --tags Key=edh:role,Value=data Key=edh:snapshot,Value=acme-prod" \
+  "restore disk: attach fails: the command to re-tag the old volume"
+assert_contains "$out" "sudo mount -a && sudo systemctl start docker" "restore disk: attach fails: how to bring the app back"
 
 # ============ resize
 : > "$T/log"
@@ -281,6 +334,22 @@ assert_eq "$(( $(line_of stop-instances) < $(line_of 'modify-instance-attribute'
 assert_contains "$(grep modify-instance-attribute "$T/log")" "--instance-type Value=m7g.large" "resize sets the new type"
 assert_contains "$(scripts)" "docker compose up -d && wait_health 60" "resize brings the app up and checks health"
 assert_contains "$(cat "$T/log")" "put-metric-alarm" "resize re-runs monitoring.sh add (monitoring: cloudwatch)"
+: > "$T/log"
+out=$(STUB_OFFERED_AZS="ap-southeast-1b	ap-southeast-1c" EDH_YES=1 run resize.sh instance m7g.large); rc=$?
+assert_status $rc 1 "resize to a type not offered in the server's AZ refused"
+assert_contains "$out" "m7g.large is not offered in ap-southeast-1a" "resize to a type not offered in the AZ: explained"
+assert_eq "$(calls stop-instances)" "0" "resize to a type not offered in the AZ: the server is not stopped"
+assert_contains "$(grep describe-instance-type-offerings "$T/log")" "Name=instance-type,Values=m7g.large Name=location,Values=ap-southeast-1a" \
+  "resize checks the offering in the server's AZ"
+# the new type does not start: back to the old type, started again
+: > "$T/log"; rm -f "$T/log.starts"
+out=$(STUB_START_FAIL=1 EDH_YES=1 run resize.sh instance m7g.large); rc=$?
+assert_status $rc 1 "resize: the new type does not start: fails"
+assert_contains "$out" "back on t4g.medium" "resize: the new type does not start: explained"
+assert_eq "$(grep modify-instance-attribute "$T/log" | sed -n 's/.*--instance-type Value=\([^ ]*\).*/\1/p' | tr '\n' ' ')" "m7g.large t4g.medium " \
+  "resize: the new type does not start: the old type is set back"
+assert_eq "$(calls start-instances)" "2" "resize: the new type does not start: started again on the old type"
+assert_eq "$(calls 'ssm send-command')" "0" "resize: the new type does not start: no health check on a half-done resize"
 sed 's/^monitoring: .*/monitoring: none/' deploy/deploy.yml > "$T/nomon.yml"; cp deploy/deploy.yml "$T/mon.yml"; cp "$T/nomon.yml" deploy/deploy.yml
 : > "$T/log"
 out=$(EDH_YES=1 run resize.sh instance m7g.large); rc=$?
