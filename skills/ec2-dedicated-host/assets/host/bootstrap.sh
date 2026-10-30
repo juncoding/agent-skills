@@ -7,6 +7,8 @@ set -euxo pipefail
 exec > >(tee -a /var/log/edh-bootstrap.log) 2>&1
 # EXIT, not only ERR: the explicit `exit 1` refusals below must leave the marker too
 trap 'rc=$?; if [ "$rc" -ne 0 ]; then mkdir -p /var/lib/edh; touch /var/lib/edh/bootstrap-failed; fi' EXIT
+# a manual re-run starts clean: a failure marker left by an earlier run must not outlive this one
+rm -f /var/lib/edh/bootstrap-failed
 VOLUME_ID="__VOLUME_ID__"
 export DEBIAN_FRONTEND=noninteractive
 
@@ -40,7 +42,8 @@ rc=0; blkid -p "$DEV" >/dev/null 2>&1 || rc=$?
 if [ "$rc" -eq 2 ] && [ -z "$(head -c 1048576 "$DEV" | tr -d '\0' | head -c 1)" ]; then mkfs.ext4 -L edh-data "$DEV"
 elif [ "$rc" -ne 0 ]; then echo "refusing to format $DEV (blkid rc=$rc, not blank)"; exit 1
 fi
-UUID=$(blkid -s UUID -o value "$DEV")
+# -p probes the device itself: blkid's cache may not know a filesystem that mkfs made a moment ago
+UUID=$(blkid -p -s UUID -o value "$DEV")
 mkdir -p /data
 grep -q "$UUID" /etc/fstab || echo "UUID=$UUID /data ext4 defaults,nofail,x-systemd.device-timeout=30s 0 2" >> /etc/fstab
 mount -a

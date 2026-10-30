@@ -123,6 +123,8 @@ assert_contains "$out" "arm64" "instance type without arm64: explained"
 out=$(STUB_MODE=existing STUB_NO_VOLUME=1 STUB_READONLY=1 prov); rc=$?
 assert_status $rc 0 "server without data volume: plan still exits 0"
 assert_contains "$out" "--apply will refuse" "server without data volume: plan warns"
+assert_not_contains "$out" "data volume edh-acme-prod-data: would create" "server without data volume: plan does not offer to create one"
+assert_contains "$out" "data volume edh-acme-prod-data: refused" "server without data volume: plan shows the volume step as refused"
 : > "$T/log"
 out=$(STUB_MODE=existing STUB_NO_VOLUME=1 STUB_READONLY=1 prov --apply); rc=$?
 assert_status $rc 1 "server without data volume: apply refuses"

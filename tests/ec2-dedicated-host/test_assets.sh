@@ -32,6 +32,11 @@ assert_eq "$(printf '%s\n' "$out" | grep -c 'apt-get -o DPkg::Lock::Timeout=600'
 assert_eq "$(printf '%s\n' "$out" | grep -n -e 'snap wait system seed.loaded' -e 'snap install' | cut -d: -f2- | head -1)" \
   "snap wait system seed.loaded" "snap waits for seeding before installing"
 assert_contains "$out" "/var/lib/edh/bootstrap-failed" "a failed bootstrap leaves a marker"
+# a manual re-run clears a stale failure marker before doing anything else
+assert_eq "$(printf '%s\n' "$out" | grep -n -e 'rm -f /var/lib/edh/bootstrap-failed' -e 'apt-get' | head -1 | cut -d: -f2-)" \
+  "rm -f /var/lib/edh/bootstrap-failed" "bootstrap clears a stale failure marker before installing anything"
+# the UUID is read with a low-level probe (blkid's cache may not know a filesystem made a moment ago)
+assert_contains "$out" 'UUID=$(blkid -p -s UUID -o value "$DEV")' "bootstrap reads the UUID with blkid -p"
 assert_not_contains "$out" "fallocate -l 1G /swapfile &&" "swap setup is not an && chain"
 
 # the format check itself, with fake blkid / mkfs.ext4 and a file as the device

@@ -328,7 +328,11 @@ sync_step "uploads bucket settings" sync_uploads_bucket
 step "ECR repo $EDH_ECR_REPO" has_ecr make_ecr
 sync_step "ECR lifecycle policy" sync_ecr
 step "internal secrets $EDH_SSM_PATH/_edh" has_secrets make_secrets
-step "data volume ${EDH_PREFIX}-data" has_volume make_volume
+if [[ -n "$EDH_IID" && -z "$VOL_ID" ]]; then   # only reachable in plan mode: --apply died in the preflight
+  warn "data volume ${EDH_PREFIX}-data: refused — server $EDH_IID exists without one; an empty volume is never created for it"
+else
+  step "data volume ${EDH_PREFIX}-data" has_volume make_volume
+fi
 step "Elastic IP $EDH_PREFIX" has_eip make_eip
 step "server $EDH_PREFIX" has_instance make_instance
 if [[ -n "$EDH_IID" ]]; then sync_hop; fi
