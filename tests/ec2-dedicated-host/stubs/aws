@@ -59,6 +59,7 @@ case "$svc $verb" in
       *) echo None ;;
     esac ;;
   "ecr get-login-password") echo stub ;;
+  "cloudwatch put-metric-data") ;;   # the real CLI prints nothing on success
   *)
     if [[ "${STUB_MODE:-empty}" == empty ]]; then
       case "$verb" in get-role|head-bucket|describe-repositories|get-parameter|get-instance-profile) exit 254 ;; esac
