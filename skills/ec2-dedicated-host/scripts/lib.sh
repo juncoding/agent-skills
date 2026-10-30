@@ -236,6 +236,8 @@ render_bootstrap() {
 # the account (12 digits, checked here too in case EDH_ACCOUNT was pre-set), and the SSM path, prefix,
 # ECR repo, topic and name, all derived from the validated client and env.
 # TODO(e2e): verify s3:if-none-match condition key (host-policy.json BackupsWrite) during the live AWS test (Task 20).
+# TODO(e2e): verify that the host (and its app container) cannot read another client's SSM parameter
+#            (host-policy.json NoOtherParameters overrides AmazonSSMManagedInstanceCore's ssm:GetParameter* on *).
 render_aws() {
   local acct; acct=$(aws_account)
   [[ "$acct" =~ ^[0-9]{12}$ ]] || die "render_aws: AWS account is not a 12-digit id: '$acct'"

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Fake `aws` CLI for tests. Logs every call; emulates a few calls; STUB_MODE=empty|existing.
+# STUB_READONLY=1 refuses (exit 99, logged as "STUB_READONLY refused") every call that isn't describe-/get-/list-/head-.
 echo "aws $*" >> "${STUB_LOG:?STUB_LOG not set}"
 args=("$@")
 # drop global options so $1 $2 are service + verb
@@ -8,6 +9,14 @@ while (( i < ${#args[@]} )); do
   case "${args[$i]}" in --region|--profile|--output|--query) i=$((i + 2));; *) clean+=("${args[$i]}"); i=$((i + 1));; esac
 done
 svc="${clean[0]:-}"; verb="${clean[1]:-}"
+if [[ "${STUB_READONLY:-}" == 1 ]]; then
+  case "$verb" in
+    describe-*|get-*|list-*|head-*) ;;
+    *) echo "STUB_READONLY refused: aws $*" >> "$STUB_LOG"; echo "stub: read-only: $svc $verb refused" >&2; exit 99 ;;
+  esac
+fi
+# optval <option> — the value after <option> in this call
+optval() { local j=0; while (( j < ${#clean[@]} )); do if [[ "${clean[$j]}" == "$1" ]]; then echo "${clean[$((j + 1))]}"; return; fi; j=$((j + 1)); done; }
 s3path() { if [[ "$1" == s3://* ]]; then echo "${STUB_S3:?}/${1#s3://}"; else echo "$1"; fi; }
 
 case "$svc $verb" in
@@ -105,11 +114,38 @@ PY
       *) echo None ;;
     esac ;;
   "ecr get-login-password") echo stub ;;
+  # --- provision.sh
+  "ec2 describe-instance-type-offerings") printf 'ap-southeast-1a\tap-southeast-1b\tap-southeast-1c\n' ;;
+  "ec2 describe-instance-types") echo "${STUB_ARCH:-arm64}" ;;
+  "ec2 describe-subnets")   # default subnets in 1b and 1c (STUB_SUBNET_AZS); STUB_NO_SUBNET=1: the id lookup finds none
+    case "$*" in
+      *SubnetId*) if [[ -n "${STUB_NO_SUBNET:-}" ]]; then echo None; else echo subnet-stub; fi ;;
+      *) printf '%s\n' "${STUB_SUBNET_AZS:-ap-southeast-1b	ap-southeast-1c}" ;;
+    esac ;;
+  "ec2 authorize-security-group-ingress")   # STUB_SG_DUP=1: the rule already exists
+    if [[ -n "${STUB_SG_DUP:-}" ]]; then
+      echo "An error occurred (InvalidPermission.Duplicate) when calling the AuthorizeSecurityGroupIngress operation: the specified rule already exists" >&2
+      exit 254
+    fi ;;
+  "ssm get-parameter")   # empty mode: not found; STUB_NO_SECRETS=1: the _edh/* secrets are missing
+    if [[ "${STUB_MODE:-empty}" == empty || ( -n "${STUB_NO_SECRETS:-}" && "$(optval --name)" == */_edh/* ) ]]; then
+      echo "An error occurred (ParameterNotFound) when calling the GetParameter operation:" >&2; exit 254
+    fi
+    echo stub ;;
+  "ssm put-parameter")   # a --value file://<path> is saved to $STUB_LOG.params/<name with / as _>
+    v=$(optval --value)
+    if [[ "$v" == file://* ]]; then
+      mkdir -p "$STUB_LOG.params"; cp "${v#file://}" "$STUB_LOG.params/$(optval --name | tr / _)"
+    fi
+    echo '{ "Version": 1 }' ;;
+  "iam get-instance-profile")   # existing: holds the role of the same name; STUB_PROFILE_EMPTY=1: holds no role
+    if [[ "${STUB_MODE:-empty}" == empty ]]; then echo "An error occurred (NoSuchEntity)" >&2; exit 254; fi
+    if [[ -n "${STUB_PROFILE_EMPTY:-}" ]]; then echo None; else optval --instance-profile-name; fi ;;
   "cloudwatch put-metric-data") ;;   # the real CLI prints nothing on success
   *)
     if [[ "${STUB_MODE:-empty}" == empty ]]; then
       case "$verb" in get-role|head-bucket|describe-repositories|get-parameter|get-instance-profile) exit 254 ;; esac
-      case "$verb" in describe-vpcs) echo vpc-stub ;; describe-instance-type-offerings) echo ap-southeast-1a ;; *) echo None ;; esac
+      case "$verb" in describe-vpcs) echo vpc-stub ;; *) echo None ;; esac
     else
       case "$verb" in
         describe-vpcs) echo vpc-stub ;;
@@ -120,11 +156,23 @@ PY
             *) echo i-stub ;;
           esac ;;
         describe-instance-information) echo Online ;;
-        describe-volumes) printf 'vol-stub\tap-southeast-1a\n' ;;
-        describe-addresses) printf 'eipalloc-stub\t203.0.113.10\n' ;;
+        describe-volumes)   # STUB_NO_VOLUME=1: no data volume; STUB_MULTI=volume: two of them
+          case "$*" in
+            *"Volumes[]."*)
+              if [[ -n "${STUB_NO_VOLUME:-}" ]]; then :
+              elif [[ "${STUB_MULTI:-}" == volume ]]; then printf 'vol-stub\tap-southeast-1a\nvol-stub2\tap-southeast-1a\n'
+              else printf 'vol-stub\tap-southeast-1a\n'; fi ;;
+            *) echo None ;;
+          esac ;;
+        describe-addresses)   # STUB_MULTI=eip: two tagged Elastic IPs
+          case "$*" in
+            *"Addresses[]."*)
+              if [[ "${STUB_MULTI:-}" == eip ]]; then printf 'eipalloc-stub\t203.0.113.10\neipalloc-stub2\t203.0.113.11\n'
+              else printf 'eipalloc-stub\t203.0.113.10\n'; fi ;;
+            *) echo None ;;
+          esac ;;
         describe-security-groups) echo sg-stub ;;
         get-lifecycle-policies) echo policy-stub ;;
-        describe-instance-type-offerings) echo ap-southeast-1a ;;
         *) echo stub ;;
       esac
     fi ;;

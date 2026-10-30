@@ -55,6 +55,14 @@ print("delete:" + ",".join(bad) + " ns:" + ",".join(s["Condition"]["StringEquals
       + " owner:" + ",".join(s3))' 2>&1)
 assert_eq "$chk" "delete: ns:EDH/acme-prod put:BackupsWrite=* owner:BackupsWrite=123456789012,BackupsRead=123456789012,AppUploads=123456789012" \
   "policy: no delete on backups; backup writes create-only; S3 only in own-account buckets; metrics only in EDH/<name>"
+# C1: AmazonSSMManagedInstanceCore allows ssm:GetParameter* on *: an explicit Deny keeps other clients' parameters out
+deny=$(printf '%s' "$pol" | python3 -I -c 'import json, sys
+st = [s for s in json.load(sys.stdin)["Statement"] if s.get("Sid") == "NoOtherParameters"]
+if len(st) != 1: print("missing"); sys.exit()
+s = st[0]
+print(s["Effect"], ",".join(sorted(s["Action"])), "|".join(s["NotResource"]), "Resource" in s)' 2>&1)
+assert_eq "$deny" "Deny ssm:GetParameter,ssm:GetParameterHistory,ssm:GetParameters,ssm:GetParametersByPath arn:aws:ssm:ap-southeast-1:123456789012:parameter/acme/prod|arn:aws:ssm:ap-southeast-1:123456789012:parameter/acme/prod/*|arn:aws:ssm:*::parameter/aws/service/* False" \
+  "policy denies reading any SSM parameter outside /acme/prod (and public /aws/service)"
 assert_contains "$pol" "repository/edh/acme" "image pulls scoped to the client's ECR repo"
 assert_contains "$pol" "sns:ap-southeast-1:123456789012:edh-acme-prod-alerts" "alerts scoped to the client's topic"
 for f in backups-lifecycle.json uploads-lifecycle.json dlm-policy.json; do
