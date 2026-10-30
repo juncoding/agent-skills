@@ -1,0 +1,83 @@
+# tests/ec2-dedicated-host/test_monitoring.sh — monitoring.sh against the stub `aws` (never real AWS)
+. "$(dirname "$0")/assert.sh"
+T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+export PATH="$TESTS_DIR/stubs:$PATH" STUB_LOG="$T/log" STUB_MODE=existing EDH_YES=1 EDH_SKIP_SSM=1 EDH_SSM_POLL_SECONDS=0
+mkdir -p "$T/p/deploy"; cp "$SKILL_DIR/assets/project/deploy.yml" "$T/p/deploy/"; cd "$T/p" || exit 1
+mon() { bash "$SKILL_DIR/scripts/monitoring.sh" "$@" 2>&1; }
+
+# ============ remove: only this client's monitoring resources, never data
+mon remove >/dev/null
+log=$(cat "$T/log")
+assert_contains "$log" "delete-alarms" "remove deletes alarms"
+assert_contains "$log" "delete-topic" "remove deletes topics"
+assert_not_contains "$log" "delete-volume" "remove never deletes volumes"
+assert_not_contains "$log" "delete-bucket" "remove never deletes buckets"
+assert_contains "$log" "iam delete-role-policy --role-name edh-acme-prod-host --policy-name edh-cwagent" "remove deletes the agent's inline policy"
+assert_not_contains "$log" "CloudWatchAgentServerPolicy" "remove never touches CloudWatchAgentServerPolicy"
+assert_not_contains "$log" "alarm-name-prefix" "remove names its alarms exactly (a prefix also matches client acme-prod's alarms)"
+bad=$(grep 'delete-alarms' "$T/log" | tr ' ' '\n' | grep '^edh-' | grep -vE '^edh-acme-prod-(disk-(root|data)-(warn|crit)|mem-high|cpu-high|cpu-credits-low|status-check|backup-stale|site-down)$' || true)
+assert_eq "$bad" "" "remove deletes only the alarms monitoring.sh creates"
+assert_contains "$(grep 'delete-alarms' "$T/log" | grep -- '--region us-east-1')" "edh-acme-prod-site-down" "remove deletes the us-east-1 site-down alarm"
+
+# ============ add
+: > "$T/log"
+mon add >/dev/null
+log=$(cat "$T/log")
+for a in disk-root-warn disk-data-crit mem-high cpu-high status-check backup-stale site-down; do
+  assert_contains "$log" "edh-acme-prod-$a" "add creates alarm $a"
+done
+assert_contains "$log" "create-health-check" "add creates route53 health check"
+# the agent's permissions: an inline policy limited to namespace CWAgent — never the managed
+# CloudWatchAgentServerPolicy, which allows PutMetricData in any namespace (a host could fake another
+# client's BackupFresh heartbeat)
+assert_not_contains "$log" "CloudWatchAgentServerPolicy" "add never attaches CloudWatchAgentServerPolicy"
+assert_not_contains "$log" "attach-role-policy" "add attaches no managed policy"
+assert_contains "$log" "iam put-role-policy --role-name edh-acme-prod-host --policy-name edh-cwagent --policy-document file://" \
+  "add puts the edh-cwagent inline policy"
+pol=$(bash -c ". '$SKILL_DIR/scripts/lib.sh'; load_config '$SKILL_DIR/assets/project/deploy.yml'; EDH_ACCOUNT=123456789012; render_aws cwagent-policy.json" 2>&1)
+chk=$(printf '%s' "$pol" | python3 -I -c 'import json, sys
+lst = lambda v: v if isinstance(v, list) else [v]
+out = []
+for s in json.load(sys.stdin)["Statement"]:
+    out.append("%s:%s:%s:%s" % (s["Effect"], ",".join(sorted(lst(s["Action"]))), ",".join(lst(s["Resource"])),
+                                json.dumps(s.get("Condition", {}), sort_keys=True)))
+print(" | ".join(sorted(out)))' 2>&1)
+assert_eq "$chk" 'Allow:cloudwatch:PutMetricData:*:{"StringEquals": {"cloudwatch:namespace": "CWAgent"}} | Allow:ec2:DescribeTags,ec2:DescribeVolumes:*:{}' \
+  "cwagent policy: PutMetricData only in namespace CWAgent, plus DescribeTags/DescribeVolumes"
+f=$(grep 'policy-name edh-cwagent' "$T/log" | grep -o 'file://[^ ]*' | sed 's#file://##')
+[[ -n "$f" && ! -e "$f" ]] && pass "rendered cwagent policy temp file removed" || fail "cwagent policy temp file left: $f"
+# backup alarm: BackupFresh heartbeat in the client's own namespace, whatever the backup schedule
+b=$(grep 'put-metric-alarm' "$T/log" | grep 'edh-acme-prod-backup-stale')
+for want in "--namespace EDH/acme-prod" "--metric-name BackupFresh" "--dimensions Name=Client,Value=acme Name=Env,Value=prod" \
+            "--statistic Sum --period 3600 --evaluation-periods 2 --threshold 1 --comparison-operator LessThanThreshold" \
+            "--treat-missing-data breaching"; do
+  assert_contains "$b" "$want" "backup alarm: $want"
+done
+assert_contains "$(grep 'put-metric-alarm' "$T/log" | grep 'site-down')" "--region us-east-1" "site-down alarm lives in us-east-1"
+# t-family: credit alarm; any other family: no credit alarm, and a stale one is deleted
+assert_contains "$(grep 'put-metric-alarm' "$T/log")" "edh-acme-prod-cpu-credits-low" "t4g server: CPU credit alarm"
+: > "$T/log"
+STUB_ITYPE=m7g.large mon add >/dev/null
+assert_not_contains "$(grep 'put-metric-alarm' "$T/log")" "cpu-credits-low" "m7g server: no CPU credit alarm"
+assert_contains "$(grep 'delete-alarms' "$T/log")" "edh-acme-prod-cpu-credits-low" "m7g server: a stale CPU credit alarm is deleted"
+# the agent install over SSM carries no secrets
+: > "$T/log"
+EDH_SKIP_SSM='' mon add >/dev/null
+s=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' "$T/log.ssm-params" | base64 --decode)
+assert_contains "$s" "amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s" "add installs and starts the CloudWatch agent"
+assert_contains "$s" '"namespace": "CWAgent"' "agent config is shipped inline"
+assert_not_contains "$s" "get-parameter" "agent install reads no secrets"
+
+# ============ status is read-only; add/remove refuse another account
+: > "$T/log"
+out=$(STUB_READONLY=1 mon status); rc=$?
+assert_status $rc 0 "status is read-only"
+sed 's/^account_id: .*/account_id: "111111111111"/' "$SKILL_DIR/assets/project/deploy.yml" > deploy/deploy.yml
+for c in add remove; do
+  : > "$T/log"
+  out=$(STUB_READONLY=1 mon $c); rc=$?
+  assert_status $rc 1 "wrong account: monitoring.sh $c refuses"
+  assert_contains "$out" "but deploy.yml says 111111111111" "wrong account: monitoring.sh $c explains"
+  assert_eq "$(grep -v 'sts get-caller-identity' "$T/log" | grep -c .)" "0" "wrong account: monitoring.sh $c makes no AWS call besides sts"
+done
+finish

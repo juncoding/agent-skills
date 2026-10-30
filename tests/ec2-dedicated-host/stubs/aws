@@ -152,7 +152,8 @@ PY
         describe-instances)
           case "$*" in
             *HttpPutResponseHopLimit*) echo "${STUB_HOP:-2}" ;;
-            *InstanceType*) printf 't4g.medium\tap-southeast-1a\n' ;;
+            *"[InstanceType,"*) printf 't4g.medium\tap-southeast-1a\n' ;;
+            *InstanceType*) echo "${STUB_ITYPE:-t4g.medium}" ;;   # STUB_ITYPE: the server's instance type
             *) echo i-stub ;;
           esac ;;
         describe-instance-information) echo Online ;;
