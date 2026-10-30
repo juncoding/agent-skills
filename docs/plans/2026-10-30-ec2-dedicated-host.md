@@ -2250,7 +2250,7 @@ add() {
   fi
   alarm "$r" status-check "EC2 status check failing" AWS/EC2 StatusCheckFailed "Name=InstanceId,Value=$EDH_IID" Maximum 60 2 1 GreaterThanOrEqualToThreshold breaching
   # edh-backup.sh publishes BackupFresh every hour while the last successful upload is within its schedule window
-  alarm "$r" backup-stale "Backups are not up to date" EDH BackupFresh "Name=Client,Value=$EDH_CLIENT Name=Env,Value=$EDH_ENV" Sum 3600 2 1 LessThanThreshold breaching
+  alarm "$r" backup-stale "Backups are not up to date" "EDH/$EDH_NAME" BackupFresh "Name=Client,Value=$EDH_CLIENT Name=Env,Value=$EDH_ENV" Sum 3600 2 1 LessThanThreshold breaching
 
   aws route53 create-health-check --caller-reference "$REF" --health-check-config \
     "Type=HTTPS,FullyQualifiedDomainName=$EDH_DOMAIN,Port=443,ResourcePath=/health,RequestInterval=30,FailureThreshold=3,EnableSNI=true" >/dev/null 2>&1 || true
