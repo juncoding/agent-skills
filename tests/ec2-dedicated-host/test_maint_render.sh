@@ -54,4 +54,11 @@ assert_contains "$out" "continued" "alert/metric with missing settings do not ab
 assert_contains "$out" "alert not sent" "alert explains why it was not sent"
 assert_contains "$out" "metric m not published" "metric explains why it was not published"
 assert_eq "$(bash -c ". '$SKILL_DIR/assets/host/edh-lib.sh'; html_escape \"a'b\"")" "a&#39;b" "html_escape escapes single quotes"
+
+# --- edh-lib.sh appends the system dirs to PATH, so a stub aws (first on PATH) still wins
+out=$(bash -c ". '$SKILL_DIR/assets/host/edh-lib.sh'; printf '%s\n' \"\$PATH\"; command -v aws")
+assert_eq "$(printf '%s\n' "$out" | tail -1)" "$TESTS_DIR/stubs/aws" "after sourcing edh-lib.sh, aws is still the stub"
+newpath=$(printf '%s\n' "$out" | head -1)
+assert_eq "${newpath:0:$((${#PATH} + 1))}" "$PATH:" "edh-lib.sh keeps the caller's PATH first"
+assert_contains "$newpath" ":/snap/bin:" "edh-lib.sh adds /snap/bin (AWS CLI on the server)"
 finish

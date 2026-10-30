@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared helpers for ec2-dedicated-host scripts that run ON the server. Source, don't run.
 set -Eeuo pipefail
-export PATH="/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+export PATH="${PATH:+$PATH:}/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 EDH_ENV_FILE="${EDH_ENV_FILE:-/etc/edh/edh.env}"
 # shellcheck disable=SC1090
 if [[ -f "$EDH_ENV_FILE" ]]; then . "$EDH_ENV_FILE"; fi
