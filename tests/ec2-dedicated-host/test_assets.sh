@@ -48,10 +48,13 @@ bad = [s["Sid"] for s in st if any("Delete" in a or a in ("s3:*", "*") for a in 
        and any("backups" in r for r in lst(s["Resource"]))]
 m = [s for s in st if "cloudwatch:PutMetricData" in lst(s["Action"])]
 w = [s for s in st if "s3:PutObject" in lst(s["Action"]) and any("backups" in r for r in lst(s["Resource"]))]
+s3 = [s["Sid"] + "=" + s.get("Condition", {}).get("StringEquals", {}).get("s3:ResourceAccount", "-")
+      for s in st if any(a.startswith("s3:") for a in lst(s["Action"]))]
 print("delete:" + ",".join(bad) + " ns:" + ",".join(s["Condition"]["StringEquals"]["cloudwatch:namespace"] for s in m)
-      + " put:" + ",".join(s["Sid"] + "=" + s.get("Condition", {}).get("StringEquals", {}).get("s3:if-none-match", "-") for s in w))' 2>&1)
-assert_eq "$chk" "delete: ns:EDH/acme-prod put:BackupsWrite=*" \
-  "policy: no delete on backups; backup writes create-only (if-none-match); metrics only in namespace EDH/<name>"
+      + " put:" + ",".join(s["Sid"] + "=" + s.get("Condition", {}).get("StringEquals", {}).get("s3:if-none-match", "-") for s in w)
+      + " owner:" + ",".join(s3))' 2>&1)
+assert_eq "$chk" "delete: ns:EDH/acme-prod put:BackupsWrite=* owner:BackupsWrite=123456789012,BackupsRead=123456789012,AppUploads=123456789012" \
+  "policy: no delete on backups; backup writes create-only; S3 only in own-account buckets; metrics only in EDH/<name>"
 assert_contains "$pol" "repository/edh/acme" "image pulls scoped to the client's ECR repo"
 assert_contains "$pol" "sns:ap-southeast-1:123456789012:edh-acme-prod-alerts" "alerts scoped to the client's topic"
 for f in backups-lifecycle.json uploads-lifecycle.json dlm-policy.json; do

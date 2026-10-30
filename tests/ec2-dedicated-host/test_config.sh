@@ -82,4 +82,9 @@ done
 for r in 'us-east-1#"x' ap-southeast-1x AP-southeast-1 us-east- us-east-12 'us east-1' 'ap-southeast-1;x' u-east-1; do
   assert_contains "$(loadv "$(with region "$r")" EDH_REGION)" "region must be" "region '$r' rejected"
 done
+# --- app_uses_instance_role: true | false (default true)
+assert_eq "$(loadv "$TPL" EDH_APP_USES_INSTANCE_ROLE)" "true" "app_uses_instance_role defaults to true in the template"
+assert_eq "$(loadv "$(with app_uses_instance_role false)" EDH_APP_USES_INSTANCE_ROLE)" "false" "app_uses_instance_role false accepted"
+assert_contains "$(loadv "$(with app_uses_instance_role yes)" EDH_APP_USES_INSTANCE_ROLE)" "app_uses_instance_role must be true or false" \
+  "app_uses_instance_role yes rejected"
 finish

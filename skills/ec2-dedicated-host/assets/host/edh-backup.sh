@@ -60,6 +60,8 @@ fi
 mkdir -p "$EDH_DATA_DIR/backups"
 chmod 700 "$EDH_DATA_DIR/backups"
 umask 077
+# the upload checks the bucket owner (bucket names are global): refuse before dumping if it isn't known
+[[ "${EDH_ACCOUNT_ID:-}" =~ ^[0-9]{12}$ ]] || die "EDH_ACCOUNT_ID (12-digit AWS account) is not set in $EDH_ENV_FILE"
 # uploads are create-only, so two backups in the same second must not share a name: wait for a new one
 for _ in 1 2 3 4 5; do
   name="app-$(date -u +%Y%m%dT%H%M%SZ).dump"
@@ -79,7 +81,7 @@ uploaded=0
 # multipart upload, which also supports If-None-Match. TODO: multipart upload for dumps over 5 GB.
 upload() {
   aws s3api put-object --bucket "$EDH_BACKUP_BUCKET" --key "db/$1/$name" --body "$file" --if-none-match '*' \
-    --region "$EDH_REGION" >/dev/null
+    --expected-bucket-owner "$EDH_ACCOUNT_ID" --region "$EDH_REGION" >/dev/null
   log "uploaded db/$1/$name"; uploaded=1
 }
 case "$TAG" in

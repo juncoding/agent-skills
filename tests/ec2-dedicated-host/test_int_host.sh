@@ -61,6 +61,7 @@ EDH_APP_MEMORY_MB=256
 EDH_USES_GOTENBERG=false
 EDH_MIGRATE_CMD='$2'
 EDH_ALERT_TOPIC_ARN=arn:aws:sns:ap-southeast-1:123456789012:edh-t-prod-alerts
+EDH_ACCOUNT_ID=123456789012
 EOF
 }
 # first_deploy — deploy r1, retrying once from scratch on a Docker Desktop (macOS) glitch: a freshly chowned
@@ -408,6 +409,7 @@ assert_status "$(PATH="$T/stampbin:$PATH" bash "$EDH_BIN_DIR/edh-backup.sh" --ta
   "write-once: first upload succeeds"
 assert_contains "$(cat "$STUB_LOG")" "s3api put-object --bucket bkt --key db/daily/app-20260101T000000Z.dump" "backup uploads with put-object"
 assert_contains "$(cat "$STUB_LOG")" "--if-none-match *" "backup upload passes --if-none-match"
+assert_contains "$(cat "$STUB_LOG")" "--expected-bucket-owner 123456789012" "backup upload checks the bucket owner"
 age_backups 5; before=$(mtime "$T/data/backups/.last_upload")
 rm -f "$T/data/backups/app-20260101T000000Z.dump"   # only S3 has it (e.g. a rebuilt server): the name is reused
 step

@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # init.sh --client NAME --domain FQDN [--emails a@x,b@y] [--env prod] [--region R] [--account-id 123456789012]
-#         [--monitoring cloudwatch|none] [--gotenberg] [--app-memory MB] [--app-port N] [--migrate "CMD"]
+#         [--monitoring cloudwatch|none] [--gotenberg] [--no-instance-role] [--app-memory MB] [--app-port N]
+#         [--migrate "CMD"]
 # Scaffold deploy/ (deploy.yml, compose.yml, Caddyfile, maint pages) in the current project. Never overwrites.
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
-client="" domain="" emails="" env=prod region=ap-southeast-1 acct="" monitoring=cloudwatch got=false mem=768 port=3000 migrate=""
+client="" domain="" emails="" env=prod region=ap-southeast-1 acct="" monitoring=cloudwatch got=false mem=768 port=3000 migrate="" role=true
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --gotenberg) got=true; shift; continue ;;
+    --no-instance-role) role=false; shift; continue ;;
     --client|--domain|--emails|--env|--region|--account-id|--monitoring|--app-memory|--app-port|--migrate)
       [[ $# -ge 2 ]] || die "$1 needs a value" ;;
     *) die "unknown option: $1" ;;
@@ -33,7 +35,8 @@ tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
 args=(-e "s#^client: .*#client: $(esc "$client")#" -e "s#^env: .*#env: $(esc "$env")#"
       -e "s#^region: .*#region: $(esc "$region")#" -e "s#^domain: .*#domain: $(esc "$domain")#"
       -e "s#^alert_emails: .*#alert_emails: $(esc "$emails")#" -e "s#^monitoring: .*#monitoring: $(esc "$monitoring")#"
-      -e "s#^uses_gotenberg: .*#uses_gotenberg: $got#" -e "s#^app_memory_mb: .*#app_memory_mb: $(esc "$mem")#"
+      -e "s#^uses_gotenberg: .*#uses_gotenberg: $got#" -e "s#^app_uses_instance_role: .*#app_uses_instance_role: $role#"
+      -e "s#^app_memory_mb: .*#app_memory_mb: $(esc "$mem")#"
       -e "s#^app_port: .*#app_port: $(esc "$port")#" -e "s#^migrate_cmd: .*#migrate_cmd: \"$(esc "$migrate")\"#")
 if [[ -n "$acct" ]]; then args+=(-e "s#^account_id: .*#account_id: \"$(esc "$acct")\"#"); fi
 sed "${args[@]}" "$A/deploy.yml" > "$tmp"

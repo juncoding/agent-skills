@@ -46,6 +46,7 @@ load_config() {
   EDH_APP_PORT=$(cfg_get "$f" app_port 3000)
   EDH_APP_MEMORY_MB=$(cfg_get "$f" app_memory_mb 768)
   EDH_USES_GOTENBERG=$(cfg_get "$f" uses_gotenberg false)
+  EDH_APP_USES_INSTANCE_ROLE=$(cfg_get "$f" app_uses_instance_role true)
   EDH_BACKUP_SCHEDULE=$(cfg_get "$f" backup_schedule auto)
   EDH_DAILY_HOUR_UTC=$(cfg_get "$f" daily_backup_hour_utc 18)
   EDH_MIGRATE_CMD=$(cfg_get "$f" migrate_cmd "")
@@ -56,7 +57,8 @@ load_config() {
   for kv in client:EDH_CLIENT env:EDH_ENV region:EDH_REGION account_id:EDH_ACCOUNT_ID domain:EDH_DOMAIN \
             alert_emails:EDH_ALERT_EMAILS monitoring:EDH_MONITORING instance_type:EDH_INSTANCE_TYPE \
             data_volume_gb:EDH_DATA_GB app_port:EDH_APP_PORT app_memory_mb:EDH_APP_MEMORY_MB \
-            uses_gotenberg:EDH_USES_GOTENBERG backup_schedule:EDH_BACKUP_SCHEDULE \
+            uses_gotenberg:EDH_USES_GOTENBERG app_uses_instance_role:EDH_APP_USES_INSTANCE_ROLE \
+            backup_schedule:EDH_BACKUP_SCHEDULE \
             daily_backup_hour_utc:EDH_DAILY_HOUR_UTC migrate_cmd:EDH_MIGRATE_CMD dockerfile:EDH_DOCKERFILE \
             build_context:EDH_BUILD_CONTEXT; do
     var="${kv#*:}"
@@ -80,6 +82,8 @@ validate_config() {
   [[ "$EDH_MONITORING" == cloudwatch || "$EDH_MONITORING" == none ]] || die "monitoring must be cloudwatch or none"
   [[ "$EDH_BACKUP_SCHEDULE" =~ ^(auto|hourly|daily)$ ]] || die "backup_schedule must be auto, hourly or daily"
   [[ "$EDH_USES_GOTENBERG" == true || "$EDH_USES_GOTENBERG" == false ]] || die "uses_gotenberg must be true or false"
+  [[ "$EDH_APP_USES_INSTANCE_ROLE" == true || "$EDH_APP_USES_INSTANCE_ROLE" == false ]] \
+    || die "app_uses_instance_role must be true or false"
   [[ "$EDH_INSTANCE_TYPE" == auto || "$EDH_INSTANCE_TYPE" =~ ^[a-z][a-z0-9-]*\.[a-z0-9]+$ ]] \
     || die "instance_type must be auto or an EC2 type like t4g.small: '$EDH_INSTANCE_TYPE'"
   [[ "$EDH_DATA_GB" =~ ^[0-9]+$ ]] && (( 10#$EDH_DATA_GB >= 8 )) || die "data_volume_gb must be a number >= 8"

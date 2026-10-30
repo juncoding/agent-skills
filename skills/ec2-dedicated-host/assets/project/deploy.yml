@@ -11,6 +11,7 @@ data_volume_gb: 20
 app_port: 3000
 app_memory_mb: 768           # container memory limit; also drives sizing
 uses_gotenberg: false        # true adds the PDF renderer (gotenberg) service
+app_uses_instance_role: true # true = the app container may use the server's IAM role (needed for S3 uploads); false = containers cannot reach instance metadata (hop limit 1)
 backup_schedule: auto        # auto (hourly < 2 GB, else daily) | hourly | daily
 daily_backup_hour_utc: 18
 migrate_cmd: ""              # e.g. npx prisma migrate deploy  (no single quotes)

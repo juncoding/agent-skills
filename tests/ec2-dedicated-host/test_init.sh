@@ -14,6 +14,7 @@ assert_contains "$y" "uses_gotenberg: true" "gotenberg set"
 assert_contains "$y" "app_memory_mb: 700" "app memory set"
 assert_contains "$y" 'migrate_cmd: "npx prisma migrate deploy && node seed.js"' "migrate set (& kept literally)"
 assert_contains "$y" 'account_id: ""' "account_id left empty without --account-id"
+assert_contains "$y" "app_uses_instance_role: true" "app may use the instance role by default"
 for f in compose.yml Caddyfile maint/maintenance.html maint/down.html; do [[ -f "deploy/$f" ]] && pass "has $f" || fail "missing $f"; done
 out=$(bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.acme.com --emails a@x.com 2>&1)
 assert_contains "$out" "already exists" "refuses to overwrite"
@@ -21,9 +22,11 @@ assert_contains "$(cat deploy/deploy.yml)" "uses_gotenberg: true" "refused init 
 
 # --account-id
 mkdir "$T/b"; cd "$T/b" || exit 1
-bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.acme.com --emails a@x.com --account-id 123456789012 >/dev/null 2>&1
+bash "$SKILL_DIR/scripts/init.sh" --client acme --domain erp.acme.com --emails a@x.com --account-id 123456789012 \
+  --no-instance-role >/dev/null 2>&1
 assert_status $? 0 "init with --account-id succeeds"
 assert_contains "$(cat deploy/deploy.yml)" 'account_id: "123456789012"' "account_id set"
+assert_contains "$(cat deploy/deploy.yml)" "app_uses_instance_role: false" "--no-instance-role sets app_uses_instance_role: false"
 assert_eq "$(bash -c ". '$SKILL_DIR/scripts/lib.sh'; load_config; echo \$EDH_ACCOUNT_ID")" "123456789012" "account_id loads back"
 
 # invalid input: refuses and creates nothing

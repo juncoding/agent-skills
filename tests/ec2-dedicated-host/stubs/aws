@@ -44,6 +44,14 @@ case "$svc $verb" in
     fi
     mkdir -p "$(dirname "$dst")"; cp "$body" "$dst"
     echo '{ "ETag": "\"stub\"" }' ;;
+  "s3api head-bucket")
+    # STUB_BUCKET=foreign: the bucket exists in another account (403); else exists (existing) / missing (empty)
+    if [[ "${STUB_BUCKET:-}" == foreign ]]; then
+      echo "An error occurred (403) when calling the HeadBucket operation: Forbidden" >&2; exit 254
+    fi
+    if [[ "${STUB_MODE:-empty}" == empty ]]; then
+      echo "An error occurred (404) when calling the HeadBucket operation: Not Found" >&2; exit 254
+    fi ;;
   "s3 ls")
     p="${clean[2]#s3://}"; b="${p%%/*}"
     [[ -d "$STUB_S3/$b" ]] && (cd "$STUB_S3/$b" || exit; find . -type f | sed 's#^\./##' | sort | while read -r k; do echo "2026-01-01 00:00:00 1 $k"; done) ;;
@@ -105,7 +113,13 @@ PY
     else
       case "$verb" in
         describe-vpcs) echo vpc-stub ;;
-        describe-instances) echo i-stub ;;
+        describe-instances)
+          case "$*" in
+            *HttpPutResponseHopLimit*) echo "${STUB_HOP:-2}" ;;
+            *InstanceType*) printf 't4g.medium\tap-southeast-1a\n' ;;
+            *) echo i-stub ;;
+          esac ;;
+        describe-instance-information) echo Online ;;
         describe-volumes) printf 'vol-stub\tap-southeast-1a\n' ;;
         describe-addresses) printf 'eipalloc-stub\t203.0.113.10\n' ;;
         describe-security-groups) echo sg-stub ;;
