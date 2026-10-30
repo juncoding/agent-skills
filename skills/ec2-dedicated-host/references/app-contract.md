@@ -103,19 +103,28 @@ them, drop old ones in a later release. For a risky or slow migration, `deploy.s
 
 The scaffolded `compose.yml` is the template to keep. You may add services, environment and settings, but:
 
-- **Bind mounts only from an allowlist**: `./<dir>` (next to compose.yml on the server, i.e. `/opt/edh/app`),
-  `/data/<dir>` or `${EDH_DATA_DIR:-/data}/<dir>`. Named volumes are fine. Never the data directory itself
-  or `/data/backups` — it holds the backup manifest, which restores trust because the app can't reach it —
-  and never a path with `..`. Short syntax, long syntax (`source:`) and flow lists (`volumes: [...]`) are all
-  checked.
-- **No access to the server itself**: no Docker socket (`docker.sock`), no `privileged: true`, no `cap_add`,
-  no `devices`, no `pid`/`ipc`/`userns_mode`/`network_mode: host`.
+- **Bind mounts only from inside the compose directory or a `/data/<dir>`**: `./<dir>` (next to
+  compose.yml; on the server `/opt/edh/app/<dir>`), `/data/<dir>` or `${EDH_DATA_DIR:-/data}/<dir>`. Never the
+  compose directory itself, never `/data` itself and never `/data/backups` — it holds the backup manifest,
+  which restores trust because the app can't reach it. Named, anonymous and tmpfs volumes are fine.
+- **Top-level volumes** may not use `driver_opts` (e.g. a `local` volume binding a host `device`) or be
+  `external`.
+- **No access to the server itself**: no `privileged: true`; no `cap_add`, `devices`, `device_cgroup_rules`
+  or `volumes_from`; no `pid`, `ipc`, `userns_mode`, `network_mode` or `cgroup` set to `host`; no `security_opt`
+  with `unconfined`; no network named `host` or using the `host` driver; `secrets`/`configs` files only from
+  inside the compose directory.
 - Keep the service names `caddy`, `app`, `postgres` (the host scripts use them), `name: ${EDH_NAME:?}`,
-  and `env_file` with `format: raw` (needs Compose ≥ 2.30, installed by bootstrap).
+  and `env_file` with `format: raw` (needs Compose ≥ 2.30 — on the server, installed by bootstrap, and on the
+  operator's Mac for the check below).
 
-The check is a lint of the file as written (comment lines ignored; values hidden in variables are not
-resolved); a refusal names the file's line numbers. On the server, `docker compose config` and
-`caddy validate` (with the caddy image `compose.yml` uses) must also pass before anything is installed.
+**How it is checked:** not by matching the file's text, but on Compose's own **normalized** configuration —
+`deploy.sh` runs `docker compose config --format json` on a copy of `compose.yml` (alone in a temp directory
+with empty `app.env`/`postgres.env`, dummy values for the variables the server sets, and the `gotenberg`
+profile enabled), so anchors and aliases, every list style, interpolation, `..` and `.` path segments are
+already resolved; paths are compared after normalization. If Compose itself rejects the file, deploy refuses
+with Compose's error (the server would too). Each violation is reported with its service and key. On the
+server, `docker compose config` and `caddy validate` (with the caddy image `compose.yml` uses) must also
+pass before anything is installed.
 
 **Only `deploy/compose.yml`, `deploy/Caddyfile` and `deploy/maint/*.html` are shipped to the server.** Any
 other file `compose.yml` refers to (a config file, an extra `env_file`, a `build:` context) does not reach it:

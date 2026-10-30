@@ -37,11 +37,16 @@ save_prev() { # copy the live config to *.prev before changing anything
   done
   SAVED=1
 }
-restore_prev() { # restore_prev <file>... — put back the copies made by save_prev (a file that didn't exist goes)
-  local f
+# restore_prev [--saved-only] <file>... — put back the copies made by save_prev. A file without a copy didn't exist
+# before this deploy (save_prev removes stale copies) and is removed — except with --saved-only (the rollback
+# branch), which only restores what was saved and never deletes.
+restore_prev() {
+  local f only=0
+  if [[ "${1:-}" == --saved-only ]]; then only=1; shift; fi
   (( SAVED )) || return 0
   for f in "$@"; do
-    if [[ -f "$EDH_APP_DIR/$f.prev" ]]; then cp -p "$EDH_APP_DIR/$f.prev" "$EDH_APP_DIR/$f"; else rm -f "$EDH_APP_DIR/$f"; fi
+    if [[ -f "$EDH_APP_DIR/$f.prev" ]]; then cp -p "$EDH_APP_DIR/$f.prev" "$EDH_APP_DIR/$f"
+    elif (( ! only )); then rm -f "$EDH_APP_DIR/$f"; fi
   done
 }
 
@@ -367,7 +372,7 @@ fi
 
 log "health check failed for $IMAGE"
 if [[ -n "$ROLLBACK" ]]; then
-  restore_prev app.env postgres.env   # roll back with the secrets it ran with
+  restore_prev --saved-only app.env postgres.env   # roll back with the secrets it ran with (if they were saved)
   write_compose_env "$ROLLBACK"
   if dc up -d app && wait_health; then
     finish_maint

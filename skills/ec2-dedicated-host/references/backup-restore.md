@@ -14,6 +14,8 @@
 to `db/hourly/` while the database is under 2 GB, and only daily above that; `hourly`/`daily` force it.
 At `daily_backup_hour_utc` (default 18) the dump also goes to `db/daily/`, and on the 1st of the month to
 `db/monthly/`. `backup.sh now` uploads to `db/daily/`. A single dump is limited to 5 GB (single PUT).
+Until the first successful deploy there is no app to back up: the job logs "no app deployed yet" and exits
+quietly (no "backup failed" email; the `backup-stale` alarm, if monitoring is on, can still fire then).
 
 ## Retention (S3 lifecycle on the backup bucket)
 

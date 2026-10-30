@@ -6,6 +6,7 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/s3" "$T/etc" "$T/app" "$T/data/backups" "$T/edh-bin"
 H="$T/edh-bin"   # installed like edh-deploy.sh does: executable, so the scripts can call each other
 install -m 755 "$SKILL_DIR"/assets/host/edh-*.sh "$H/"
+: > "$T/app/compose.yml"   # an app is deployed (edh-backup.sh does nothing before the first deploy)
 # docker: pg_dump prints a fake archive, pg_restore swallows its input, psql answers 1
 cat > "$T/bin/docker" <<'EOS'
 #!/bin/bash

@@ -21,75 +21,85 @@ require aws
 require_account
 require docker; require git; require curl
 
-# check_compose — a lint of deploy/compose.yml as written (comment lines ignored; values hidden in variables are
-# not resolved), not a sandbox. Bind-mount sources are an allowlist: ./<dir>, /data/<dir> or
-# ${EDH_DATA_DIR…}/<dir>, never the data directory itself or /data/backups (the backup manifest, which restores
-# trust because the app can't reach it), never a path with "..". Named volumes are fine. Also refused:
-# privileged mode, cap_add, devices, the Docker socket, and the host's pid/ipc/user/network namespace.
-# Prints "<line><TAB>data|host<TAB><reason>: <text>" per problem, with the file's own line numbers.
-COMPOSE_LINT='
-BEGIN { q = sprintf("%c", 39); vi = -1 }
-function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
-function unq(s,  f) {
-  s = trim(s); f = substr(s, 1, 1)
-  if ((f == "\"" || f == q) && length(s) >= 2 && substr(s, length(s), 1) == f) s = substr(s, 2, length(s) - 2)
-  return s
-}
-function hit(kind, why) { if (last != NR) printf "%d\t%s\t%s: %s\n", NR, kind, why, trim($0); last = NR }
-function srcof(v,  i, j, rest) {   # host side of a short-syntax volume ("" for an anonymous volume)
-  v = unq(v)
-  if (substr(v, 1, 2) == "${") {
-    i = index(v, "}"); if (i == 0) return v
-    rest = substr(v, i + 1); j = index(rest, ":"); return j ? substr(v, 1, i + j - 1) : ""
-  }
-  i = index(v, ":"); return i ? substr(v, 1, i - 1) : ""
-}
-function check(src,  s) {
-  src = unq(src)
-  if (src == "") return
-  if (src ~ /^[A-Za-z0-9][A-Za-z0-9_.-]*$/) return                       # named volume
-  if (src ~ /(^|\/)\.\.(\/|$)/) { hit("host", "path with \"..\""); return }
-  s = src
-  if (sub(/^\$\{EDH_DATA_DIR(:?-[^}]*)?\}/, "/data", s) || s ~ /^\/data(\/|$)/) {
-    if (s ~ /^\/data\/*$/) hit("data", "the whole data directory")
-    else if (s ~ /^\/data\/+backups(\/|$)/) hit("data", "/data/backups (the backup manifest)")
-    return
-  }
-  if (src ~ /^\.\/+[^\/]/) return                                         # ./<dir>
-  hit("host", "bind mount from " src " (allowed: ./<dir>, /data/<dir>, ${EDH_DATA_DIR:-/data}/<dir>)")
-}
-{
-  line = $0
-  if (line ~ /^[ \t]*#/ || line ~ /^[ \t]*$/) next
-  sub(/[ \t]+#.*$/, "", line)
-  match(line, /^[ \t]*/); ind = RLENGTH
-  if (vi >= 0 && ind <= vi) vi = -1
-  if (vi >= 0 && line ~ /^[ \t]*-/) {
-    item = line; sub(/^[ \t]*-[ \t]*/, "", item)
-    if (item ~ /^\{/) {
-      if (match(item, /source:[ \t]*[^,}]+/)) { s = substr(item, RSTART, RLENGTH); sub(/^source:[ \t]*/, "", s); check(s) }
-    } else if (item !~ /^[A-Za-z_]+:([ \t]|$)/) check(srcof(item))
-  }
-  if (line ~ /^[ \t]+volumes:[ \t]*$/) vi = ind
-  else if (line ~ /^[ \t]+volumes:[ \t]*\[/) {
-    s = line; sub(/^[^\[]*\[/, "", s); sub(/\][ \t]*$/, "", s); n = split(s, parts, ",")
-    for (k = 1; k <= n; k++) check(srcof(parts[k]))
-  }
-  if (line ~ /^[ \t]*(-[ \t]*)?source:/) { s = line; sub(/^[ \t]*(-[ \t]*)?source:[ \t]*/, "", s); check(s) }
-  if (line ~ /docker\.sock/) hit("host", "the Docker socket")
-  if (line ~ /^[ \t]*privileged:[ \t]*["\047]?(true|True|TRUE|yes|Yes|YES|on|On|ON)["\047]?[ \t]*$/) hit("host", "privileged mode")
-  if (line ~ /^[ \t]*(pid|ipc|userns_mode|network_mode):[ \t]*["\047]?host["\047]?[ \t]*$/) hit("host", "a host namespace")
-  if (line ~ /^[ \t]*(cap_add|devices):/) hit("host", "extra capabilities or devices")
-}'
+# check_compose — checks deploy/compose.yml on Compose's own normalized config (docker compose config --format
+# json: anchors, aliases, every list style, interpolation and relative paths already resolved), not on its text.
+# It is rendered as the server would see it: compose.yml alone in a directory with empty app.env/postgres.env,
+# dummy values for the variables edh-deploy.sh sets, and the gotenberg profile on. Refused (each reported with
+# its service and key):
+#   data   — a bind mount of /data itself or of /data/backups (the backup manifest, which restores trust because
+#            the app can't reach it)
+#   host   — any other bind mount whose source isn't inside the compose directory or a /data/<subdir>; top-level
+#            volumes with driver_opts or external; privileged; cap_add, devices, device_cgroup_rules; pid, ipc,
+#            userns_mode, network_mode or cgroup "host"; an "unconfined" security_opt; volumes_from; a network
+#            named host or with the host driver; secrets/configs files outside the compose directory
+COMPOSE_CHECK_PY='import json, os, sys
+cfg = json.load(sys.stdin)
+dirs = [os.path.normpath(d) for d in sys.argv[1:]]
+out = []
+def bad(kind, where, why): out.append("%s\t%s: %s" % (kind, where, why))
+def inside(p):   # strictly inside the compose directory
+    return any(p.startswith(d + "/") for d in dirs)
+for name, svc in sorted((cfg.get("services") or {}).items()):
+    w = "service " + name
+    for v in svc.get("volumes") or []:
+        if v.get("type") != "bind":
+            continue
+        src = os.path.normpath(v.get("source") or "")
+        parts = src.split("/")
+        if src == "/data":
+            bad("data", w + ": volumes", "bind mount of the whole data directory /data")
+        elif src.startswith("/data/") and parts[2] == "backups":
+            bad("data", w + ": volumes", "bind mount of %s (the backup manifest)" % src)
+        elif not (src.startswith("/data/") or inside(src)):
+            bad("host", w + ": volumes", "bind mount of %s (allowed: ./<dir> next to compose.yml, /data/<dir>)" % src)
+    if svc.get("privileged") is True:
+        bad("host", w + ": privileged", "privileged mode")
+    for k in ("cap_add", "devices", "device_cgroup_rules", "volumes_from"):
+        if svc.get(k):
+            bad("host", w + ": " + k, "not allowed")
+    for k in ("pid", "ipc", "userns_mode", "network_mode", "cgroup"):
+        if str(svc.get(k) or "").lower() == "host":
+            bad("host", w + ": " + k, "host namespace")
+    for o in svc.get("security_opt") or []:
+        if "unconfined" in str(o):
+            bad("host", w + ": security_opt", str(o))
+for name, vol in sorted((cfg.get("volumes") or {}).items()):
+    if vol.get("driver_opts"):
+        bad("host", "volume " + name + ": driver_opts", "not allowed (a bind device)")
+    if vol.get("external"):
+        bad("host", "volume " + name + ": external", "not allowed")
+for name, net in sorted((cfg.get("networks") or {}).items()):
+    if net.get("name") == "host" or net.get("driver") == "host":
+        bad("host", "network " + name, "the host network")
+for top in ("secrets", "configs"):
+    for name, item in sorted((cfg.get(top) or {}).items()):
+        f = item.get("file")
+        if f and not inside(os.path.normpath(f)):
+            bad("host", "%s %s: file" % (top[:-1], name), "%s is outside the compose directory" % f)
+print("\n".join(out))'
 check_compose() {
-  local hits data host
-  hits=$(awk "$COMPOSE_LINT" deploy/compose.yml) || die "could not read deploy/compose.yml"
-  data=$(printf '%s\n' "$hits" | awk -F'\t' '$2 == "data" { print "  line " $1 ": " $3 }')
-  host=$(printf '%s\n' "$hits" | awk -F'\t' '$2 == "host" { print "  line " $1 ": " $3 }')
+  local d real json err hits data host
+  require_python
+  d=$(mktemp -d) || die "mktemp failed"
+  cp deploy/compose.yml "$d/compose.yml" || { rm -rf "$d"; die "deploy/compose.yml missing"; }
+  : > "$d/app.env"; : > "$d/postgres.env"
+  real=$(cd "$d" && pwd -P)
+  # interpolation only from these values (the server's .env sets them); no .env file, no COMPOSE_* from the shell
+  if ! json=$(env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_ENV_FILES EDH_NAME=lintcheck APP_IMAGE=lint:check \
+       DOMAIN=lint.example.com MAINT_BYPASS=lint EDH_DATA_DIR=/data APP_PORT=3000 APP_MEMORY_MB=512 \
+       COMPOSE_PROFILES=gotenberg docker compose --project-directory "$d" -f "$d/compose.yml" config --format json 2>"$d/err"); then
+    err=$(cat "$d/err"); rm -rf "$d"
+    die "deploy/compose.yml is not valid for Compose (docker compose config failed; the server would refuse it too):
+$err"
+  fi
+  hits=$(printf '%s' "$json" | python3 -I -c "$COMPOSE_CHECK_PY" "$d" "$real") || { rm -rf "$d"; die "could not check deploy/compose.yml"; }
+  rm -rf "$d"
+  data=$(printf '%s\n' "$hits" | awk -F'\t' '$1 == "data" { print "  " $2 }')
+  host=$(printf '%s\n' "$hits" | awk -F'\t' '$1 == "host" { print "  " $2 }')
   [[ -z "$data" ]] || die "deploy/compose.yml mounts the data directory or /data/backups into a container — refusing: that would put the backup manifest within the app's reach. Mount only subdirectories such as \${EDH_DATA_DIR:-/data}/caddy:
 $data${host:+
 $host}"
-  [[ -z "$host" ]] || die "deploy/compose.yml gives a container access to the server itself — refusing. Bind mounts may only come from ./<dir>, /data/<dir> or \${EDH_DATA_DIR:-/data}/<dir> (no '..'); not allowed: the Docker socket, privileged, cap_add, devices, pid/ipc/userns_mode/network_mode: host (see references/app-contract.md):
+  [[ -z "$host" ]] || die "deploy/compose.yml gives a container access to the server itself — refusing (see references/app-contract.md):
 $host"
 }
 

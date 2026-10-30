@@ -3,7 +3,9 @@
 . "$(dirname "$0")/assert.sh"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/s3"
-printf '#!/bin/sh\necho "docker $*" >> "$STUB_LOG.docker"\ncase "$1" in login) cat >/dev/null ;; esac\nexit 0\n' > "$T/bin/docker"
+# (`docker compose … config` runs for real: deploy.sh lints Compose's normalized config; it needs no daemon)
+REAL_DOCKER=$(command -v docker)
+printf '#!/bin/bash\necho "docker $*" >> "$STUB_LOG.docker"\ncase "$1" in login) cat >/dev/null ;; esac\nif [[ "$1" == compose && " $* " == *" config "* ]]; then exec "%s" "$@"; fi\nexit 0\n' "$REAL_DOCKER" > "$T/bin/docker"
 printf '#!/bin/sh\nexit 0\n' > "$T/bin/curl"
 printf '#!/bin/sh\necho 203.0.113.10\n' > "$T/bin/dig"
 chmod +x "$T/bin/"*

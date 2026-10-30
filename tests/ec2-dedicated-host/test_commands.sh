@@ -3,7 +3,9 @@
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/s3"
 # fake docker / curl / dig: no image is built, no network is used
-printf '#!/bin/sh\necho "docker $*" >> "$STUB_LOG.docker"\ncase "$1" in login) cat >/dev/null ;; esac\nexit 0\n' > "$T/bin/docker"
+# (`docker compose … config` runs for real: deploy.sh lints Compose's normalized config; it needs no daemon)
+REAL_DOCKER=$(command -v docker)
+printf '#!/bin/bash\necho "docker $*" >> "$STUB_LOG.docker"\ncase "$1" in login) cat >/dev/null ;; esac\nif [[ "$1" == compose && " $* " == *" config "* ]]; then exec "%s" "$@"; fi\nexit 0\n' "$REAL_DOCKER" > "$T/bin/docker"
 # curl: like the real one, -w still prints "000 ..." when the request fails
 printf '#!/bin/sh\nif [ "${FAKE_CURL_RC:-0}" != 0 ]; then printf "000 in 0.001s"; fi\nexit ${FAKE_CURL_RC:-0}\n' > "$T/bin/curl"
 printf '#!/bin/sh\necho 203.0.113.10\n' > "$T/bin/dig"
@@ -97,66 +99,70 @@ for c in "1:previous version is still serving" "2:rolled back to the previous ve
   assert_contains "$out" "${c#*:}" "edh-deploy exit ${c%%:*}: '${c#*:}'"
   assert_not_contains "$out" "live:" "edh-deploy exit ${c%%:*}: not reported live"
 done
-# compose_with <after-regex> <line>... — deploy/compose.yml with the lines inserted after the first match
-# (saved in $T/compose.save first); prints the line number of the first inserted line
-compose_with() {
-  local re="$1" n; shift
-  cp deploy/compose.yml "$T/compose.save"
-  n=$(grep -nE -m1 -- "$re" "$T/compose.save" | cut -d: -f1)
-  { head -n "$n" "$T/compose.save"; printf '%s\n' "$@"; tail -n +"$((n + 1))" "$T/compose.save"; } > deploy/compose.yml
-  echo $((n + 1))
-}
-VOL='/srv/maint:ro'                    # the last entry of caddy's volumes: list
-SVC='^    restart: unless-stopped'     # a key of the first service (caddy)
-# compose_refused <after-regex> <expected text> <line>... — deploy refuses, explains, names the line, ships nothing
+# ---- the compose lint runs on Compose's own normalized config (docker compose config --format json)
+# compose_plus <line>... — deploy/compose.yml with the lines appended (a new service under services:, and/or
+# top-level keys); the original is saved in $T/compose.save
+compose_plus() { cp deploy/compose.yml "$T/compose.save"; printf '%s\n' "$@" >> deploy/compose.yml; }
+# compose_refused <expected text> <line>... — deploy refuses, explains, ships nothing
 compose_refused() {
-  local re="$1" want="$2" n; shift 2
-  n=$(compose_with "$re" "$@")
+  local want="$1"; shift
+  compose_plus "$@"
   : > "$T/log"; : > "$T/log.docker"
   out=$(run deploy.sh --allow-dirty); rc=$?
-  assert_status $rc 1 "compose '$*' refused"
-  assert_contains "$out" "$want" "compose '$*': explained"
-  n=$((n + ${LINE_OFF:-0}))   # LINE_OFF: which inserted line is the offending one
-  assert_contains "$out" "line $n:" "compose '$*': names line $n of the file"
-  assert_eq "$(grep -c buildx "$T/log.docker")$(calls put-object)" "00" "compose '$*': nothing built or shipped"
+  local what; what=$(printf '%s ' "$@" | tr -s ' ' | cut -c1-90)
+  assert_status $rc 1 "compose refused: $what"
+  assert_contains "$out" "$want" "compose refused: $what — explained"
+  assert_eq "$(grep -c buildx "$T/log.docker")$(calls put-object)" "00" "compose refused: $what — nothing built or shipped"
   cp "$T/compose.save" deploy/compose.yml
 }
-# no container may mount the backups directory (the backup manifest) or the whole data directory
-for m in '- /data:/hostdata' '- "/data/:/hostdata"' '- ${EDH_DATA_DIR:-/data}:/d' '- ${EDH_DATA_DIR:-/data}/backups:/b:ro' \
-         '- /data/backups:/b' '- /data//backups/x:/b'; do
-  compose_refused "$VOL" "backup manifest" "      $m"
+P='  probe:'; I='    image: busybox'
+# the data directory itself or /data/backups (the backup manifest) — in any spelling
+for m in /data /data/ '${EDH_DATA_DIR:-/data}' '${EDH_DATA_DIR:-/data}/backups' /data/backups /data//backups/x /data/. /data/./backups \
+         '${EDH_DATA_DIR:-/data}/caddy/../backups'; do
+  compose_refused "backup manifest" "$P" "$I" "    volumes:" "      - $m:/d"
 done
-LINE_OFF=1 compose_refused "$VOL" "backup manifest" "      - type: bind" "        source: /data" "        target: /x"
-LINE_OFF=1 compose_refused "$VOL" "backup manifest" "      - type: bind" "        source: '\${EDH_DATA_DIR:-/data}'" "        target: /x"
-# bind mounts only from ./<dir>, /data/<dir> or ${EDH_DATA_DIR}/<dir>; nothing else that reaches the server
-for m in '- /:/host' '- "/:/host:ro"' '- /var/run/docker.sock:/var/run/docker.sock' '- /etc:/hostetc:ro' '- ~/x:/x' \
-         '- ${HOME}/x:/x' '- ./:/app' '- .:/app' '- ../secrets:/s' '- ${EDH_DATA_DIR:-/data}/caddy/../backups:/b' '- "..:/up"' \
-         '- { type: bind, source: /, target: /host }'; do
-  compose_refused "$VOL" "access to the server itself" "      $m"
+compose_refused "backup manifest" "$P" "$I" "    volumes:" "      - type: bind" "        source: /data" "        target: /x"
+compose_refused "backup manifest" "$P" "$I" "    volumes:" "    - /data:/d"                       # list at the key's indent
+compose_refused "backup manifest" "$P" "$I" '    x-mount: &datamount "/data:/d"' "    volumes:" "      - *datamount"   # anchor/alias
+compose_refused "backup manifest" "$P" "$I" "    volumes: [" '      "./ok:/ok",' '      "/data:/d"' "    ]"   # multi-line flow list
+compose_refused "backup manifest" "$P" "$I" '    volumes: ["/data/backups:/b"]'
+# bind mounts only from inside deploy/ or a /data/<subdir>; nothing else that reaches the server
+for m in / /var/run/docker.sock /etc '~/x' '${HOME}/x' ./ . ./. ../secrets '..'; do
+  compose_refused "access to the server itself" "$P" "$I" "    volumes:" "      - $m:/x"
 done
-LINE_OFF=1 compose_refused "$VOL" "access to the server itself" "      - type: bind" "        source: /" "        target: /host"
-cp deploy/compose.yml "$T/compose.save"
-sed 's#^    volumes:$#    volumes: ["/:/host"]#' "$T/compose.save" > "$T/flow.yml"   # flow-style list (first service)
-awk 'NR == 1, /^    volumes:/' "$T/flow.yml" | grep -q '"/:/host"' && cp "$T/flow.yml" deploy/compose.yml
-out=$(run deploy.sh --allow-dirty); rc=$?
-assert_status $rc 1 "compose: a flow-style volumes list is checked too"
-cp "$T/compose.save" deploy/compose.yml
+compose_refused "access to the server itself" "$P" "$I" "    volumes:" "      - { type: bind, source: /, target: /host }"
+compose_refused "access to the server itself" "$P" "$I" "    volumes:" "      - rootvol:/host" "volumes:" "  rootvol:" \
+  "    driver: local" "    driver_opts:" "      type: none" "      o: bind" "      device: /"
+compose_refused "access to the server itself" "$P" "$I" "    volumes:" "      - ext:/x" "volumes:" "  ext:" "    external: true"
 for k in 'privileged: true' 'privileged: "true"' 'pid: host' 'ipc: host' 'userns_mode: host' 'network_mode: host' \
-         'network_mode: "host"' 'cap_add: [SYS_ADMIN]' 'devices: ["/dev/sda:/dev/sda"]'; do
-  compose_refused "$SVC" "access to the server itself" "    $k"
+         'network_mode: "host"' 'cgroup: host' 'cap_add: [SYS_ADMIN]' 'devices: ["/dev/sda:/dev/sda"]' \
+         "device_cgroup_rules: ['c 1:3 mr']" 'security_opt: [seccomp:unconfined]' 'security_opt: ["apparmor:unconfined"]' \
+         'volumes_from: [caddy]'; do
+  compose_refused "access to the server itself" "$P" "$I" "    $k"
 done
-compose_refused "$SVC" "access to the server itself" "    cap_add:" "      - NET_ADMIN"
-# ordinary settings still pass, and comment lines are ignored
-n=$(compose_with "$VOL" '      - "${EDH_DATA_DIR:-/data}/uploads:/uploads"' '      - ./extra:/extra:ro' '      - appdata:/var/lib/x' \
-  '      - /tmp/anonymous' '      # - /var/run/docker.sock:/x (a comment)')
-cp deploy/compose.yml "$T/c2" && { head -n 12 "$T/c2"; printf '%s\n' '    privileged: false' '    network_mode: bridge' \
-  '    command: ["echo", "Loading..."]'; tail -n +13 "$T/c2"; } > deploy/compose.yml
-: > "$T/log"
-out=$(EDH_YES=1 run deploy.sh --allow-dirty --allow-non-main); rc=$?   # prod + dirty tree: emergency flags
-[[ $rc == 0 ]] || printf '%s\n' "$out" | grep -A5 ERROR
-assert_status $rc 0 "compose with ordinary settings (data subdirectory, ./dir, named and anonymous volumes, a comment) deploys"
+compose_refused "access to the server itself" "$P" "$I" "    secrets: [pw]" "secrets:" "  pw:" "    file: /etc/passwd"
+compose_refused "access to the server itself" "$P" "$I" "    configs: [cf]" "configs:" "  cf:" "    file: ../outside.conf"
+compose_refused "access to the server itself" "$P" "$I" "    networks: [hostnet]" "networks:" "  hostnet:" "    name: host" "    external: true"
+# the violation names the service and the key
+compose_plus "$P" "$I" "    privileged: true"
+out=$(run deploy.sh --allow-dirty); rc=$?
+assert_contains "$out" "service probe: privileged" "a violation names the service and the key"
 cp "$T/compose.save" deploy/compose.yml
-rm -f "$T/c2" "$T/flow.yml"
+# a compose file Compose itself rejects is refused with Compose's error
+compose_plus "$P" "    image: [not, a, string]"
+out=$(run deploy.sh --allow-dirty); rc=$?
+assert_status $rc 1 "an invalid compose.yml is refused"
+assert_contains "$out" "docker compose config" "an invalid compose.yml: Compose's error is shown"
+cp "$T/compose.save" deploy/compose.yml
+# ordinary settings still pass: named, anonymous and tmpfs volumes, a data subdirectory, a dir next to compose.yml
+compose_plus "$P" "$I" '    command: ["echo", "Loading..."]' "    privileged: false" "    volumes:" "      - appdata:/var/lib/x" \
+  "      - ./extra:/extra:ro" "      - /tmp/anonymous" '      - "${EDH_DATA_DIR:-/data}/uploads:/uploads"' \
+  "      - type: tmpfs" "        target: /scratch" "    secrets: [s1]" "      # - /var/run/docker.sock:/x (a comment)" \
+  "volumes:" "  appdata: {}" "secrets:" "  s1:" "    file: ./app.env"
+out=$(EDH_YES=1 run deploy.sh --allow-dirty --allow-non-main); rc=$?   # prod + dirty tree: emergency flags
+[[ $rc == 0 ]] || printf '%s\n' "$out" | grep -A8 ERROR
+assert_status $rc 0 "compose with ordinary settings (named/anonymous/tmpfs volumes, ./dir, a data subdirectory) deploys"
+cp "$T/compose.save" deploy/compose.yml
 out=$(run deploy.sh); rc=$?
 assert_status $rc 0 "the scaffolded compose.yml passes the lint"
 assert_eq "$(git status --porcelain)" "" "compose.yml restored after the mount tests"

@@ -250,7 +250,9 @@ Building and reviewing the skill hardened it well beyond the design. The importa
   `compose.yml`, Caddyfile, and the Caddy/Postgres containers — is restored on any abort before the switch,
   failed migrations included; rollback restores the env the old image ran with. The app gets `AWS_REGION`,
   `EDH_UPLOADS_BUCKET` and (with Gotenberg) `GOTENBERG_URL` unless it sets them itself. `deploy.sh` refuses compose files that expose `/data`, `/data/backups`, `/`, the Docker socket,
-  `..` paths, privileged mode, capabilities, devices or host namespaces (bind mounts are an allowlist).
+  `..` paths, privileged mode, capabilities, devices or host namespaces — checked on Compose's own normalized
+  config (`docker compose config --format json`), with bind mounts limited to the compose directory and
+  `/data/<subdir>`.
   **Prod deploys must be exactly `origin/<prod_branch>`** (default `main`) with a clean tree
   (`--allow-non-main` for emergencies, with a warning and confirmation). An aborted deploy also restores
   `/etc/edh/edh.env`; a failed first deploy reports that nothing was serving.

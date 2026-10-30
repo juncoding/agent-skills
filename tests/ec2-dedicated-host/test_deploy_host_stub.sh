@@ -19,7 +19,9 @@ case "$*" in
   *"config --format json"*) echo '{"services":{"caddy":{"image":"caddy:2.10-alpine"}}}' ;;
   *"pg_database_size"*) echo 100 ;;
   *" pg_dump "*) if [[ -n "${FAKE_DUMP_FAIL:-}" ]]; then exit 1; fi; echo PGDMP-fake ;;
-  *" wget "*) if [[ "$*" == *"http://app:${FAKE_HEALTHY_PORT:-3000}/health"* ]]; then exit 0; fi; exit 1 ;;
+  *" wget "*)
+    if [[ -n "${FAKE_BAD_IMAGE:-}" ]] && grep -qx "APP_IMAGE=$FAKE_BAD_IMAGE" "$EDH_APP_DIR/.env" 2>/dev/null; then exit 1; fi
+    if [[ "$*" == *"http://app:${FAKE_HEALTHY_PORT:-3000}/health"* ]]; then exit 0; fi; exit 1 ;;
 esac
 exit 0
 EOS
@@ -51,6 +53,16 @@ EOV
 deploy() { : > "$STUB_LOG"; : > "$FAKE_DOCKER_LOG"; bash "$1/host/edh-deploy.sh" "$1" "$2" >"$T/out" 2>&1; echo $?; }
 alert_text() { grep -- 'sns publish' "$STUB_LOG" || true; }
 health_checks() { grep -c ' wget ' "$FAKE_DOCKER_LOG" || true; }
+
+# ============ before the first deploy there is nothing to back up: the hourly timer is quiet (no alert)
+make_release "$T/r0" "echo migrated" 3000
+cp "$T/r0/release.env" "$T/release0.env"
+: > "$STUB_LOG"
+out=$(EDH_ENV_FILE="$T/release0.env" EDH_BIN_DIR="$T/r0/host" bash "$T/r0/host/edh-backup.sh" 2>&1); rc=$?
+assert_status "$rc" 0 "backup before the first deploy: exit 0"
+assert_contains "$out" "no app deployed yet" "backup before the first deploy: says why it does nothing"
+assert_eq "$(grep -c 'sns publish' "$STUB_LOG")" "0" "backup before the first deploy: no 'backup failed' email"
+assert_eq "$(grep -c 'put-object' "$STUB_LOG")" "0" "backup before the first deploy: nothing uploaded"
 
 # ============ first deploy, migration fails: nothing to fall back to and nothing was serving
 make_release "$T/r1" "exit 3" 3000
@@ -88,6 +100,18 @@ rc=$(FAKE_DUMP_FAIL=1 deploy "$T/r3" img:v3)
 assert_status "$rc" 1 "port change + aborted: exit 1"
 assert_eq "$(cmp -s "$T/edh.env.before" "$EDH_ENV_FILE" && echo same)" "same" "port change + aborted: edh.env restored"
 assert_not_contains "$(alert_text)" "SITE DOWN" "port change + aborted: no false SITE DOWN"
+
+# ============ rollback when .env was missing (so no app.env.prev was saved): the rollback keeps the app.env and
+# postgres.env just written instead of deleting them
+rc=$(deploy "$T/r2" img:good)
+assert_status "$rc" 0 "deploy img:good"
+printf 'img:good\n' > "$EDH_APP_DIR/previous_image"
+rm -f "$EDH_APP_DIR/.env" "$EDH_APP_DIR/app.env" "$EDH_APP_DIR/postgres.env"
+rc=$(FAKE_BAD_IMAGE=img:bad deploy "$T/r2" img:bad)
+assert_status "$rc" 2 "unhealthy image, .env missing: rolled back (exit 2)"
+assert_eq "$([[ -f "$EDH_APP_DIR/app.env" && -f "$EDH_APP_DIR/postgres.env" ]] && echo kept)" "kept" \
+  "rollback without saved copies: app.env and postgres.env not deleted"
+assert_contains "$(cat "$EDH_APP_DIR/.env")" "APP_IMAGE=img:good" "rollback without saved copies: back on img:good"
 
 # ============ the registry login comes before the Caddyfile is validated (private caddy images)
 rc=$(EDH_SKIP_PULL= deploy "$T/r2" "123456789012.dkr.ecr.ap-southeast-1.amazonaws.com/edh/t:v4")

@@ -2672,6 +2672,7 @@ Run this in a scratch project with the fixture app, plus a tiny Postgres-backed 
 25. The Route 53 health check's billing class (HTTPS, 30 s) against the ~$4/month monitoring estimate.
 26. The `memory.peak` cgroup path (`/sys/fs/cgroup/system.slice/docker-<id>.scope/memory.peak`) on Ubuntu 24.04.
 27. Where `maint.sh on` writes the bypass link when no TTY is available (agent sessions).
+28. Restoring a missing or expired backup key: under the new policy (no ListBucket) S3 returns AccessDenied (403), not 404. Check the operator sees a clear "could not download" message.
 
 Record findings in the design doc under "Validation results". Fix any bugs with a failing test first, then the fix.
 
