@@ -2644,6 +2644,26 @@ Run this in a scratch project with the fixture app, plus a tiny Postgres-backed 
 8. `resize.sh disk 25`, then `status.sh`.
 9. `teardown.sh`. Afterwards, with the user's explicit OK, delete the test data volume and the buckets by hand.
 
+**Also verify these, which the stub-based tests cannot prove** (collected during code review):
+1. `s3:if-none-match` policy condition: PUT without the header is denied, PUT with it is allowed, and a second PUT to the same key returns 412.
+2. `s3:ResourceAccount` conditions cause no unexpected denies.
+3. Generated secrets are exactly 40 characters (`get-parameter --with-decryption --query 'length(Parameter.Value)'`).
+4. Neither the host nor the app container can read another client's SSM parameters (AccessDenied). `/aws/service/*` still resolves, and the SSM agent and Session Manager still work.
+5. Ubuntu 24.04 arm64 `docker-compose-v2` is at least 2.30. If it isn't, switch bootstrap to Docker's own apt repository.
+6. The snap AWS CLI supports `put-object --if-none-match`, and `/snap/bin` is on PATH for systemd units and for SSM RunShellScript.
+7. The data volume shows up at `/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol…` on t4g.
+8. `head-bucket` error text says `(404)` for a missing bucket and `(403)` for a foreign one.
+9. DLM accepts the policy, including `cron(30 19 ? * SUN *)` and tag keys containing a colon, and snapshots appear.
+10. `run-instances` succeeds right after `create-instance-profile`, given the IAM wait.
+11. Instance metadata hop limits: with 1, containers get no token; with 2, the app container can use the role.
+12. A replacement server that reuses the existing data volume does not reformat it.
+13. The `cloudwatch:namespace` condition matches `EDH/<name>`, and the agent's namespace restriction holds.
+14. Both lifecycle configurations are accepted, and the shorter per-prefix noncurrent expiry wins over the catch-all rule.
+15. After a reboot with the data volume detached, Docker stays down instead of starting on the root disk.
+16. `restore.sh disk`: with the `RequiresMountsFor=/data` drop-in in place, Docker comes back after the volume swap.
+17. A forced bootstrap failure leaves `bootstrap-failed`, and provision then fails fast. The dpkg lock timeout and snap seed wait behave correctly on a real first boot.
+18. `describe-instance-types` reports arm64 for t4g, and `describe-subnets` with `default-for-az` returns the default subnets.
+
 Record findings in the design doc under "Validation results". Fix any bugs with a failing test first, then the fix.
 
 **Commit** `fix(ec2-dedicated-host): <issue>` for each bug found, plus `docs: e2e validation results`.
