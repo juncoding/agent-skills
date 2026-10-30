@@ -219,6 +219,12 @@ ssm_run() {
   return "$code"
 }
 
+# render_bootstrap <data-volume-id> — EC2 user-data with the volume id filled in
+render_bootstrap() {
+  [[ "$1" =~ ^vol-[0-9a-f]+$ ]] || die "render_bootstrap: not a volume id: '$1'"
+  sed "s/__VOLUME_ID__/$1/" "$EDH_SKILL_DIR/assets/host/bootstrap.sh"
+}
+
 # wait_ssm <instance-id> — until the SSM agent reports Online (max 10 min)
 wait_ssm() {
   local _

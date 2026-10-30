@@ -1,0 +1,8 @@
+[Unit]
+Description=edh monthly restore drill
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/edh/bin/edh-drill.sh

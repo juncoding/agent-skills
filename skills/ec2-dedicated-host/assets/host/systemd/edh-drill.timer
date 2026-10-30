@@ -1,0 +1,10 @@
+[Unit]
+Description=edh monthly restore drill
+
+[Timer]
+Unit=edh-drill.service
+OnCalendar=*-*-02 03:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
