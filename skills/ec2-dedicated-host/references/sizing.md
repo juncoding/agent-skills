@@ -38,7 +38,7 @@ current server.
 | Signal | Action |
 |---|---|
 | `mem-high` alarms, app restarts (OOM) | larger t4g (`resize.sh instance t4g.large`), or raise `app_memory_mb` if the server has room |
-| `cpu-credits-low` keeps firing, `cpu-high` during normal hours | the load is not bursty: move to **m8g** (`resize.sh instance m8g.large`), which has no credit limits; unlimited-mode surplus credits on a busy t4g can cost more than m8g |
+| `cpu-surplus-charged` keeps firing, `cpu-high` during normal hours | the load is not bursty: move to **m8g** (`resize.sh instance m8g.large`), which has no credit limits; unlimited-mode surplus credits on a busy t4g can cost more than m8g |
 | `disk-data-warn` (80 %) | `resize.sh disk <GB>` — online, no downtime |
 | `disk-root-warn` | usually images/logs: images are pruned to 3 per deploy and logs capped at 3 × 10 MB; check `sudo docker system df` |
 

@@ -417,7 +417,7 @@ make_bundle() {
 alarm_names() {
   local s
   if [[ "$1" == global ]]; then printf '%s\n' "${EDH_PREFIX}-site-down"; return 0; fi
-  for s in disk-root-warn disk-root-crit disk-data-warn disk-data-crit mem-high cpu-high cpu-credits-low \
+  for s in disk-root-warn disk-root-crit disk-data-warn disk-data-crit mem-high cpu-high cpu-surplus-charged \
            status-check backup-stale; do
     printf '%s\n' "${EDH_PREFIX}-$s"
   done

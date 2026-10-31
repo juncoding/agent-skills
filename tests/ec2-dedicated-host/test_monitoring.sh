@@ -25,13 +25,14 @@ assert_not_contains "$log" "delete-bucket" "remove never deletes buckets"
 assert_contains "$log" "iam delete-role-policy --role-name edh-acme-prod-host --policy-name edh-cwagent" "remove deletes the agent's inline policy"
 assert_not_contains "$log" "CloudWatchAgentServerPolicy" "remove never touches CloudWatchAgentServerPolicy"
 assert_not_contains "$log" "alarm-name-prefix" "remove names its alarms exactly (a prefix also matches client acme-prod's alarms)"
-bad=$(grep 'delete-alarms' "$T/log" | tr ' ' '\n' | grep '^edh-' | grep -vE '^edh-acme-prod-(disk-(root|data)-(warn|crit)|mem-high|cpu-high|cpu-credits-low|status-check|backup-stale|site-down)$' || true)
+bad=$(grep 'delete-alarms' "$T/log" | tr ' ' '\n' | grep '^edh-' | grep -vE '^edh-acme-prod-(disk-(root|data)-(warn|crit)|mem-high|cpu-high|cpu-surplus-charged|status-check|backup-stale|site-down)$' || true)
 assert_eq "$bad" "" "remove deletes only the alarms monitoring.sh creates"
 assert_contains "$(grep 'delete-alarms' "$T/log" | grep -- '--region us-east-1')" "edh-acme-prod-site-down" "remove deletes the us-east-1 site-down alarm"
 
 # ============ add
 : > "$T/log"
-mon add >/dev/null
+out=$(mon add)
+assert_contains "$out" "expected until the first deploy" "add says which alerts a new server sends before its first deploy"
 log=$(cat "$T/log")
 for a in disk-root-warn disk-data-crit mem-high cpu-high status-check backup-stale site-down; do
   assert_contains "$log" "edh-acme-prod-$a" "add creates alarm $a"
@@ -70,12 +71,20 @@ for a in disk-root-warn disk-root-crit disk-data-warn disk-data-crit mem-high; d
   assert_contains "$(grep 'put-metric-alarm' "$T/log" | grep "edh-acme-prod-$a ")" "--namespace CWAgent/acme-prod " "alarm $a in namespace CWAgent/acme-prod"
 done
 assert_eq "$(grep -cE 'namespace CWAgent( |$)' "$T/log")" "0" "no alarm uses the shared CWAgent namespace"
-# t-family: credit alarm; any other family: no credit alarm, and a stale one is deleted
-assert_contains "$(grep 'put-metric-alarm' "$T/log")" "edh-acme-prod-cpu-credits-low" "t4g server: CPU credit alarm"
+# t-family (unlimited mode): alarm when surplus credits are actually charged — a new t4g starts at a credit
+# balance of 0, so a low-balance alarm would fire on every new server; any other family: none, a stale one deleted
+cred=$(grep 'put-metric-alarm' "$T/log" | grep 'edh-acme-prod-cpu-surplus-charged ')
+assert_contains "$cred" "--metric-name CPUSurplusCreditsCharged " "t4g server: alarm on surplus credits charged"
+assert_contains "$cred" "--comparison-operator GreaterThanThreshold" "t4g server: surplus alarm fires on any charge"
+assert_contains "$cred" "--treat-missing-data notBreaching" "t4g server: no surplus data is not an alarm"
+assert_not_contains "$(grep 'put-metric-alarm' "$T/log")" "CPUCreditBalance" "no alarm on the credit balance (0 on a new server)"
+# one late StatusCheckFailed datapoint must not raise an alarm (a dead server is caught by site-down)
+assert_contains "$(grep 'put-metric-alarm' "$T/log" | grep 'edh-acme-prod-status-check ')" "--treat-missing-data missing" \
+  "status-check: missing data keeps the state"
 : > "$T/log"
 STUB_ITYPE=m7g.large mon add >/dev/null
-assert_not_contains "$(grep 'put-metric-alarm' "$T/log")" "cpu-credits-low" "m7g server: no CPU credit alarm"
-assert_contains "$(grep 'delete-alarms' "$T/log")" "edh-acme-prod-cpu-credits-low" "m7g server: a stale CPU credit alarm is deleted"
+assert_not_contains "$(grep 'put-metric-alarm' "$T/log")" "cpu-surplus-charged" "m7g server: no CPU credit alarm"
+assert_contains "$(grep 'delete-alarms' "$T/log")" "edh-acme-prod-cpu-surplus-charged" "m7g server: a stale CPU credit alarm is deleted"
 # the agent install over SSM carries no secrets
 : > "$T/log"
 EDH_SKIP_SSM='' mon add >/dev/null

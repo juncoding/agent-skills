@@ -182,7 +182,7 @@ healthy version; `deploy.sh` turns those into the messages above.
 | Monitoring module (alarms + Route 53 health check) | ~$4 |
 
 t4g runs in **unlimited** CPU-credit mode (the AWS default, left as is): sustained high CPU costs extra
-rather than throttling — the `cpu-credits-low` alarm says when to move up (`references/sizing.md`).
+rather than throttling — the `cpu-surplus-charged` alarm says when to move up (`references/sizing.md`).
 
 ## References
 

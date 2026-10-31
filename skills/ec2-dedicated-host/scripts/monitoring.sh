@@ -156,11 +156,14 @@ add() {
   alarm "$r" mem-high "Memory over 90% for 10 min" "CWAgent/$EDH_NAME" mem_used_percent "Name=InstanceId,Value=$EDH_IID" Average 300 2 90 GreaterThanThreshold missing
   alarm "$r" cpu-high "CPU over 80% for 15 min" AWS/EC2 CPUUtilization "Name=InstanceId,Value=$EDH_IID" Average 300 3 80 GreaterThanThreshold missing
   if [[ "$type" == t* ]]; then
-    alarm "$r" cpu-credits-low "Burst credits nearly used up — consider a larger or m-family server" AWS/EC2 CPUCreditBalance "Name=InstanceId,Value=$EDH_IID" Minimum 300 1 50 LessThanThreshold missing
+    # unlimited mode: a low balance never throttles (a new server even starts at 0), it only costs money once
+    # the surplus can't be paid back — so alarm on surplus credits actually charged
+    alarm "$r" cpu-surplus-charged "CPU above the burst baseline is being charged — consider a larger or m-family server" AWS/EC2 CPUSurplusCreditsCharged "Name=InstanceId,Value=$EDH_IID" Sum 3600 1 0 GreaterThanThreshold notBreaching
   else   # no burst credits outside the t family (e.g. after resize.sh to m7g): drop a stale alarm
-    awsr cloudwatch delete-alarms --alarm-names "${EDH_PREFIX}-cpu-credits-low"
+    awsr cloudwatch delete-alarms --alarm-names "${EDH_PREFIX}-cpu-surplus-charged"
   fi
-  alarm "$r" status-check "EC2 status check failing" AWS/EC2 StatusCheckFailed "Name=InstanceId,Value=$EDH_IID" Maximum 60 2 1 GreaterThanOrEqualToThreshold breaching
+  # missing data keeps the state: one late datapoint is not a failure (a dead server is caught by site-down)
+  alarm "$r" status-check "EC2 status check failing" AWS/EC2 StatusCheckFailed "Name=InstanceId,Value=$EDH_IID" Maximum 60 2 1 GreaterThanOrEqualToThreshold missing
   # edh-backup.sh publishes BackupFresh every hour while the last successful upload is within its schedule
   # window (hourly or daily alike), so the alarm is the same for every schedule
   alarm "$r" backup-stale "Backups are not up to date" "EDH/$EDH_NAME" BackupFresh "Name=Client,Value=$EDH_CLIENT Name=Env,Value=$EDH_ENV" Sum 3600 2 1 LessThanThreshold breaching
@@ -168,6 +171,7 @@ add() {
   ensure_health_check
   alarm us-east-1 site-down "https://$EDH_DOMAIN/health failing from outside" AWS/Route53 HealthCheckStatus "Name=HealthCheckId,Value=$HC" Minimum 60 1 1 LessThanThreshold breaching
   ok "monitoring on (about \$4/month). Alerts and recoveries are emailed to $EDH_ALERT_EMAILS"
+  log "on a new server, site-down and backup-stale alerts are expected until the first deploy and the first hourly backup after it"
 }
 
 remove() {

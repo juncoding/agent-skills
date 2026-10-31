@@ -20,8 +20,8 @@ Every alarm emails on ALARM **and** on recovery (OK).
 | `edh-acme-prod-disk-data-warn` / `-crit` | same, `path=/data` | max > 80 % / > 90 % over 5 min | missing |
 | `edh-acme-prod-mem-high` | `CWAgent/acme-prod` `mem_used_percent` | average > 90 % for 2 × 5 min | missing |
 | `edh-acme-prod-cpu-high` | `AWS/EC2` `CPUUtilization` | average > 80 % for 3 × 5 min | missing |
-| `edh-acme-prod-cpu-credits-low` (t-family only) | `AWS/EC2` `CPUCreditBalance` | minimum < 50 over 5 min | missing |
-| `edh-acme-prod-status-check` | `AWS/EC2` `StatusCheckFailed` | max ≥ 1 for 2 × 1 min | breaching |
+| `edh-acme-prod-cpu-surplus-charged` (t-family only) | `AWS/EC2` `CPUSurplusCreditsCharged` | sum > 0 in 1 h (unlimited mode is billing CPU above the baseline) | not breaching |
+| `edh-acme-prod-status-check` | `AWS/EC2` `StatusCheckFailed` | max ≥ 1 for 2 × 1 min | missing (a late datapoint is no failure; a dead server trips site-down) |
 | `edh-acme-prod-backup-stale` | `EDH/acme-prod` `BackupFresh` (dims `Client=acme`, `Env=prod`) | sum < 1 for 2 × 1 h | breaching |
 
 - Disk alarms use the dimensions `InstanceId`, `path`, `fstype=ext4`. To see what the agent really
@@ -31,6 +31,10 @@ Every alarm emails on ALARM **and** on recovery (OK).
 - Alarm names are always exact, never a prefix (`edh-acme-prod-` is also the start of a client named
   `acme-prod`'s names).
 - Expect site-down and status-check emails during `resize.sh instance` and reboots (the server is off).
+- On a new server, site-down and backup-stale are in ALARM until the first deploy and the first hourly backup
+  after it (the emails arrive once the subscriptions are confirmed); both send a recovery email then.
+- The CPU credit alarm watches the cost, not the balance: t4g runs in unlimited mode and starts with 0
+  credits, so a low balance means nothing by itself. `cpu-surplus-charged` fires when AWS bills surplus credits.
 
 ## BackupFresh — stale backups
 
