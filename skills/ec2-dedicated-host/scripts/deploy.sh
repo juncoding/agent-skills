@@ -9,7 +9,8 @@
 # env prod: refuses unless the current branch is prod_branch (default main), HEAD equals origin/<prod_branch>
 # (after git fetch) and the working tree is clean.
 # release_flow: tags (any env): builds exactly origin/<prod_branch> (the release branch release.sh moves) from a
-# temporary clean worktree, whatever is checked out here; the v* tag at that commit becomes APP_VERSION.
+# temporary clean worktree, whatever is checked out here; refuses unless that commit is on origin/main and a v* tag
+# on origin points at it (the tag becomes APP_VERSION).
 # --allow-non-main still builds the working copy (emergency, as above).
 # Exit: 0 live · non-zero on failure: 1 with an ERROR: line for every handled case (the message says whether the
 # previous version is still serving); an unexpected AWS CLI error exits with the CLI's own code.
@@ -137,7 +138,7 @@ release_tag() {
 
 # use_release_branch — SRC = a clean worktree of origin/<prod_branch>; the release commit's own deploy.yml applies
 use_release_branch() {
-  local pb="$EDH_PROD_BRANCH" commit tag
+  local pb="$EDH_PROD_BRANCH" commit main tag
   if ! GIT_TERMINAL_PROMPT=0 git fetch origin "$pb" --quiet; then
     refuse "could not fetch $pb from origin (on a first release run release.sh vX.Y.Z; else check 'git remote -v', your network and your GitHub access)"
   fi
@@ -153,9 +154,14 @@ use_release_branch() {
   load_config "$SRC/deploy/deploy.yml"
   [[ "$EDH_RELEASE_FLOW" == tags && "$EDH_PROD_BRANCH" == "$pb" ]] \
     || refuse "origin/$pb's deploy/deploy.yml does not say release_flow: tags with prod_branch: $pb — release a commit that does"
+  # provenance, re-checked here (the release branch may have been pushed to by hand): on origin/main, and tagged
+  GIT_TERMINAL_PROMPT=0 git fetch --quiet --no-tags origin main || refuse "could not fetch main from origin"
+  main=$(git rev-parse -q --verify 'FETCH_HEAD^{commit}') || die "git fetch origin main returned no commit"
+  git merge-base --is-ancestor "$commit" "$main" \
+    || refuse "origin/$pb (${commit:0:12}) is not on origin/main — only reviewed code ships. Release a tag on main with release.sh"
   tag="${EDH_RELEASE_TAG:-}"
   if [[ -z "$tag" ]]; then tag=$(release_tag "$commit"); fi
-  [[ -n "$tag" ]] || warn "no v* tag on origin points at origin/$pb ($commit): APP_VERSION stays empty"
+  [[ -n "$tag" ]] || refuse "no v* tag on origin points at origin/$pb (${commit:0:12}) — release a tag on main with release.sh vX.Y.Z"
   [[ -z "$tag" || "$tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] || die "unexpected tag name: '$tag'"
   EDH_APP_VERSION="$tag"
 }

@@ -35,6 +35,11 @@ In this mode `deploy.sh` (alone or from `release.sh`) fetches `origin/<prod_bran
 reaches the image or the config bundle. The release commit's own `deploy/deploy.yml`, `compose.yml`,
 `Caddyfile` and maintenance pages are used, and it must still say `release_flow: tags`.
 
+It re-checks provenance itself, because the release branch can be pushed to by hand: it refuses unless the
+commit is on `origin/main` **and** a `v*` tag on origin points at it. **Protect the release branch** on GitHub
+(a ruleset: block force pushes and deletion, restrict who can push to the people who release) so that
+`release.sh` stays the only way it moves.
+
 Version information reaching the app:
 
 | | How | Where |

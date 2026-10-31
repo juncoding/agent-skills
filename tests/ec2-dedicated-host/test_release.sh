@@ -90,6 +90,22 @@ assert_contains "$out" "v1.1.0" "deploy.sh in release mode: names the version"
 assert_contains "$(bundle_env)" "EDH_APP_VERSION=v1.1.0" "deploy.sh in release mode: version from the tag at origin/release"
 git checkout -q -- deploy/OPERATIONS.md
 
+# ============ deploy.sh re-checks provenance: a commit pushed straight to origin/release doesn't deploy
+( cd "$T/other" && git fetch -q origin && git checkout -q -B rogue origin/release && echo rogue > marker.txt \
+  && git commit -qam rogue && git push -q origin rogue:release )
+out=$(deploy); rc=$?
+assert_status $rc 1 "release branch holding a commit not on main: deploy refused"
+assert_contains "$out" "not on origin/main" "commit not on main: explained"
+assert_eq "$(shipped)" "00" "commit not on main: nothing built or shipped"
+( cd "$T/other" && git checkout -q main && git pull -q && echo v2b > marker.txt && git commit -qam untagged \
+  && git push -q origin main && git push -q -f origin main:release )
+out=$(deploy); rc=$?
+assert_status $rc 1 "release branch at an untagged commit on main: deploy refused"
+assert_contains "$out" "no v* tag on origin" "untagged commit: explained"
+assert_eq "$(shipped)" "00" "untagged commit: nothing built or shipped"
+( cd "$T/other" && git push -q -f origin "$SHA2:refs/heads/release" )   # (the test puts release back by hand)
+git checkout -q -- deploy/OPERATIONS.md
+
 # ============ refused: a tag that isn't on main
 git stash -q -u
 git checkout -q -b side "$SHA2" && echo side > marker.txt && git commit -qam side

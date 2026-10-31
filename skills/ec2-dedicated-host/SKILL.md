@@ -133,7 +133,7 @@ branch (`prod_branch`, normally `release`), and "release v1.2.3" means `release.
 that isn't on origin or isn't on `origin/main`, never moves the release branch backwards and never
 force-pushes; tell the user the refusal and its fix, don't work around it. `deploy.sh` then always builds
 exactly `origin/<prod_branch>` from a clean temporary worktree — the operator's branch and uncommitted work
-don't matter — and the tag becomes the app's `APP_VERSION`. Going back is `rollback.sh` or a new fix tag.
+don't matter — and refuses unless that commit is on `origin/main` with a `v*` tag on origin (the tag becomes the app's `APP_VERSION`). Going back is `rollback.sh` or a new fix tag.
 
 Every deploy prints the commit being deployed (`deploying <sha> "<subject>"`). Use `--maint` when a
 migration is risky or slow: users see the maintenance page while it runs.
