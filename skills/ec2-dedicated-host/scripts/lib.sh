@@ -316,10 +316,12 @@ ssm_run() {
   return "$code"
 }
 
-# render_bootstrap <data-volume-id> — EC2 user-data with the volume id filled in
+# render_bootstrap <data-volume-id> <0|1> — EC2 user-data with the volume id filled in; 1 = the volume is new
+# (tag edh:fs=new), so the bootstrap may format it even though a new EBS volume does not read as zeros
 render_bootstrap() {
   [[ "$1" =~ ^vol-[0-9a-f]+$ ]] || die "render_bootstrap: not a volume id: '$1'"
-  sed "s/__VOLUME_ID__/$1/" "$EDH_SKILL_DIR/assets/host/bootstrap.sh"
+  [[ "${2:-}" == [01] ]] || die "render_bootstrap: the new-volume flag must be 0 or 1, not '${2:-}'"
+  sed -e "s/__VOLUME_ID__/$1/" -e "s/__FORMAT_NEW__/$2/" "$EDH_SKILL_DIR/assets/host/bootstrap.sh"
 }
 
 # render_aws <file-in-assets/aws> — fill placeholders for this client.

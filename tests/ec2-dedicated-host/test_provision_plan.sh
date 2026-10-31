@@ -55,6 +55,7 @@ for c in "s3api put-public-access-block:2" "s3api put-bucket-versioning:2" "s3ap
          "iam attach-role-policy:1" "iam put-role-policy:1"; do
   assert_eq "$(calls "${c%:*}")" "${c##*:}" "apply re-runs ${c%:*} (x${c##*:})"
 done
+assert_not_contains "$out" "TransitionDefaultMinimumObjectSize" "lifecycle calls print no AWS JSON"
 assert_contains "$out" "security group rules: synced" "rules that already exist (InvalidPermission.Duplicate) are fine"
 assert_eq "$(grep ' s3api put-' "$T/log" | grep -vc -- '--expected-bucket-owner 123456789012')" "0" \
   "every bucket configuration call checks the bucket owner"
@@ -88,6 +89,26 @@ assert_status $rc 1 "bootstrap failed: apply fails"
 assert_contains "$out" "bootstrap FAILED" "bootstrap failed: explained"
 assert_contains "$out" "/var/log/edh-bootstrap.log" "bootstrap failed: points at the log"
 assert_eq "$(calls 'ssm send-command')" "1" "bootstrap failed: detected on the first check (no waiting)"
+cp "$T/base.yml" deploy/deploy.yml
+
+# ============ data volume format flag: a new EBS volume need not read as zeros, so provision tells the bootstrap
+# which volume it created (tag edh:fs=new) and tags it edh:fs=ext4 once the bootstrap has succeeded
+assert_contains "$(sed -n '/^make_volume()/,/^}/p' "$SKILL_DIR/scripts/provision.sh")" "edh:fs=new" "a created data volume is tagged edh:fs=new"
+cp "$T/nomon.yml" deploy/deploy.yml
+: > "$T/log"; rm -f "$T/log.userdata"
+out=$(STUB_MODE=existing STUB_NO_INSTANCE=1 STUB_VOL_ID=vol-0abc123 STUB_VOL_FS=new prov --apply); rc=$?
+assert_status $rc 0 "new server, volume tagged edh:fs=new: apply succeeds"
+assert_contains "$(cat "$T/log.userdata" 2>/dev/null)" 'FORMAT_NEW="1"' "volume tagged edh:fs=new: the bootstrap may format it"
+assert_contains "$(grep 'create-tags' "$T/log")" "--resources vol-0abc123 --tags Key=edh:fs,Value=ext4" "after the bootstrap the volume is tagged edh:fs=ext4"
+: > "$T/log"; rm -f "$T/log.userdata"
+out=$(STUB_MODE=existing STUB_NO_INSTANCE=1 STUB_VOL_ID=vol-0abc123 prov --apply); rc=$?
+assert_status $rc 0 "new server, volume without the tag: apply succeeds"
+assert_contains "$(cat "$T/log.userdata" 2>/dev/null)" 'FORMAT_NEW="0"' "volume without edh:fs=new (reused): the bootstrap gets no format flag"
+assert_eq "$(grep -c 'Key=edh:fs' "$T/log")" "0" "volume without edh:fs=new: its tags are left alone"
+: > "$T/log"
+out=$(STUB_MODE=existing STUB_VOL_FS=new STUB_SSM_RC=3 prov --apply); rc=$?
+assert_status $rc 1 "bootstrap failed on a new volume: apply fails"
+assert_eq "$(grep -c 'Key=edh:fs' "$T/log")" "0" "bootstrap failed: the volume stays edh:fs=new"
 cp "$T/base.yml" deploy/deploy.yml
 
 # ============ buckets that exist but aren't ours (403 / other owner): refuse before any change

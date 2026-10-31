@@ -240,6 +240,11 @@ PY
     if [[ "${STUB_MODE:-empty}" == empty ]]; then echo "An error occurred (NoSuchEntity)" >&2; exit 254; fi
     if [[ -n "${STUB_PROFILE_EMPTY:-}" ]]; then echo None; else optval --instance-profile-name; fi ;;
   "cloudwatch put-metric-data") ;;   # the real CLI prints nothing on success
+  "s3api put-bucket-lifecycle-configuration")   # the real CLI (2.2x+) prints this on success
+    printf '{\n    "TransitionDefaultMinimumObjectSize": "all_storage_classes_128K"\n}\n' ;;
+  "ec2 run-instances")   # the --user-data file is saved to $STUB_LOG.userdata
+    v=$(optval --user-data); [[ "$v" != file://* ]] || cp "${v#file://}" "$STUB_LOG.userdata"
+    echo i-new ;;
   *)
     if [[ "${STUB_MODE:-empty}" == empty ]]; then
       case "$verb" in get-role|head-bucket|describe-repositories|get-parameter|get-instance-profile) exit 254 ;; esac
@@ -250,6 +255,8 @@ PY
         describe-instances)
           case "$*" in
             *HttpPutResponseHopLimit*) echo 2 ;;
+            *"Reservations[].Instances[].InstanceId"*)   # STUB_NO_INSTANCE=1: no server yet
+              if [[ -n "${STUB_NO_INSTANCE:-}" ]]; then echo None; else echo i-stub; fi ;;
             # STUB_DOT_VOLUMES: volumes the server deletes when it is terminated (DeleteOnTermination=true)
             *BlockDeviceMappings*) echo "${STUB_DOT_VOLUMES:-vol-root}" ;;
             *"[InstanceType,"*) printf '%s\tap-southeast-1a\n' "${STUB_ITYPE:-t4g.medium}" ;;
@@ -276,9 +283,10 @@ PY
             *"Attachments[0].InstanceId"*) echo "${STUB_VOL_ATTACHED:-None}" ;;
             *"Volumes[0].Size"*) echo "${STUB_VOL_SIZE:-20}" ;;
             *"Volumes[]."*)
+              # STUB_VOL_FS: the volume's edh:fs tag (default: none); STUB_VOL_ID: its id (default vol-stub)
               if [[ -n "${STUB_NO_VOLUME:-}" ]]; then :
-              elif [[ "${STUB_MULTI:-}" == volume ]]; then printf 'vol-stub\tap-southeast-1a\nvol-stub2\tap-southeast-1a\n'
-              else printf 'vol-stub\tap-southeast-1a\n'; fi ;;
+              elif [[ "${STUB_MULTI:-}" == volume ]]; then printf 'vol-stub\tap-southeast-1a\tNone\nvol-stub2\tap-southeast-1a\tNone\n'
+              else printf '%s\tap-southeast-1a\t%s\n' "${STUB_VOL_ID:-vol-stub}" "${STUB_VOL_FS:-None}"; fi ;;
             *) echo None ;;
           esac ;;
         describe-addresses)   # STUB_MULTI=eip: two tagged Elastic IPs

@@ -28,7 +28,7 @@ if [[ "$TYPE" == auto ]]; then TYPE=$(recommend_instance "$EDH_APP_MEMORY_MB" "$
 if [[ "$EDH_APP_USES_INSTANCE_ROLE" == true ]]; then HOP=2; else HOP=1; fi
 VPC=$(awsr ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId' --output text)
 [[ -n "$VPC" && "$VPC" != None ]] || die "no default VPC in $EDH_REGION"
-SG_ID="" VOL_ID="" VOL_AZ="" AZ="" SUBNET="" EIP_ALLOC="" EIP_IP="" EDH_IID=""
+SG_ID="" VOL_ID="" VOL_AZ="" VOL_NEW=0 AZ="" SUBNET="" EIP_ALLOC="" EIP_IP="" EDH_IID=""
 WORK=$(mktemp -d); at_exit 'rm -rf "$WORK"'   # temp files (secrets, rendered policies), removed on any exit
 IAM_WAIT="${EDH_IAM_WAIT:-15}"                   # seconds for IAM changes to propagate (tests: 0)
 
@@ -126,7 +126,7 @@ sync_bucket() { # sync_bucket <name> <lifecycle-file>
   awsr s3api put-bucket-tagging --bucket "$1" --expected-bucket-owner "$ACCT" --tagging \
     "TagSet=[{Key=Name,Value=$1},{Key=Protect,Value=true},{Key=edh:client,Value=$EDH_CLIENT},{Key=edh:env,Value=$EDH_ENV},{Key=Client,Value=$EDH_CLIENT},{Key=ManagedBy,Value=ec2-dedicated-host}]"
   render_aws "$2" > "$WORK/$2"
-  awsr s3api put-bucket-lifecycle-configuration --bucket "$1" --expected-bucket-owner "$ACCT" --lifecycle-configuration "file://$WORK/$2"
+  awsr s3api put-bucket-lifecycle-configuration --bucket "$1" --expected-bucket-owner "$ACCT" --lifecycle-configuration "file://$WORK/$2" >/dev/null
 }
 HAVE_BACKUP=0 HAVE_UPLOADS=0
 has_backup_bucket()   { (( HAVE_BACKUP )); }
@@ -169,19 +169,21 @@ make_secrets() {
 find_volume() {
   local out n
   out=$(awsr ec2 describe-volumes --filters "Name=tag:edh:client,Values=$EDH_CLIENT" "Name=tag:edh:env,Values=$EDH_ENV" \
-    "Name=tag:edh:role,Values=data" --query 'Volumes[].[VolumeId,AvailabilityZone]' --output text) \
+    "Name=tag:edh:role,Values=data" --query 'Volumes[].[VolumeId,AvailabilityZone,Tags[?Key==`edh:fs`]|[0].Value]' \
+    --output text) \
     || die "cannot list volumes"
   n=$(lines "$out")
   (( n <= 1 )) || die "more than one data volume tagged $EDH_NAME: $(printf '%s' "$out" | cut -f1 | tr '\n' ' ')"
   (( n == 1 )) || return 0
   VOL_ID=$(printf '%s' "$out" | cut -f1); VOL_AZ=$(printf '%s' "$out" | cut -f2)
+  if [[ "$(printf '%s' "$out" | cut -f3)" == new ]]; then VOL_NEW=1; fi
 }
 has_volume() { [[ -n "$VOL_ID" ]]; }
 make_volume() {
   VOL_ID=$(awsr ec2 create-volume --availability-zone "$AZ" --size "$EDH_DATA_GB" --volume-type gp3 --encrypted \
-    --tag-specifications "$(tag_spec volume "${EDH_PREFIX}-data" edh:role=data Protect=true "edh:snapshot=$EDH_NAME")" \
+    --tag-specifications "$(tag_spec volume "${EDH_PREFIX}-data" edh:role=data Protect=true "edh:snapshot=$EDH_NAME" edh:fs=new)" \
     --query VolumeId --output text)
-  VOL_AZ="$AZ"
+  VOL_AZ="$AZ"; VOL_NEW=1
   awsr ec2 wait volume-available --volume-ids "$VOL_ID"
 }
 
@@ -211,7 +213,7 @@ make_instance() {
   local ami
   ami=$(awsr ssm get-parameter --name /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id \
     --query Parameter.Value --output text)
-  render_bootstrap "$VOL_ID" > "$WORK/user-data"
+  render_bootstrap "$VOL_ID" "$VOL_NEW" > "$WORK/user-data"
   EDH_IID=$(awsr ec2 run-instances --image-id "$ami" --instance-type "$TYPE" --subnet-id "$SUBNET" \
     --security-group-ids "$SG_ID" --iam-instance-profile "Name=$ROLE" --user-data "file://$WORK/user-data" \
     --metadata-options HttpTokens=required,HttpPutResponseHopLimit=$HOP,HttpEndpoint=enabled \
@@ -355,6 +357,8 @@ if (( APPLY )); then
     die "bootstrap FAILED on $EDH_IID — see /var/log/edh-bootstrap.log (Session Manager: sudo tail -n 100 /var/log/edh-bootstrap.log)"
   fi
   (( st == 0 )) || die "bootstrap did not finish within 10 minutes — check /var/log/edh-bootstrap.log via Session Manager"
+  # the volume now has a filesystem: no later bootstrap may treat it as new
+  if (( VOL_NEW )); then awsr ec2 create-tags --resources "$VOL_ID" --tags Key=edh:fs,Value=ext4; fi
   ok "server ready: $EDH_IID at $EIP_IP"
   if [[ "$EDH_MONITORING" == cloudwatch ]]; then EDH_OPLOG_SKIP=1 "$BASH" "$(dirname "$0")/monitoring.sh" add; fi
   log "DNS: point an A record for $EDH_DOMAIN to $EIP_IP (needed before the first deploy can get HTTPS)"

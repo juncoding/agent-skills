@@ -10,6 +10,7 @@ trap 'rc=$?; if [ "$rc" -ne 0 ]; then mkdir -p /var/lib/edh; touch /var/lib/edh/
 # a manual re-run starts clean: a failure marker left by an earlier run must not outlive this one
 rm -f /var/lib/edh/bootstrap-failed
 VOLUME_ID="__VOLUME_ID__"
+FORMAT_NEW="__FORMAT_NEW__"   # 1 = provision created this volume and it was never formatted (tag edh:fs=new)
 export DEBIAN_FRONTEND=noninteractive
 
 # The host scripts need python3, flock (util-linux), timeout (coreutils), curl and docker compose >= 2.30.
@@ -37,9 +38,11 @@ DEV="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${VOLUME_ID//-/}"
 for _ in $(seq 1 120); do [ -e "$DEV" ] && break; sleep 5; done
 [ -e "$DEV" ] || { echo "data volume $VOLUME_ID never attached"; exit 1; }
 # blkid -p: 0 = has a filesystem/signature, 2 = nothing found, anything else = probe error. Format only when
-# nothing was found AND the first 1 MiB is all zeros; never on a probe error.
+# nothing was found AND either provision just created the volume (a new encrypted EBS volume does not read as
+# zeros) or the first 1 MiB is all zeros; never on a probe error.
 rc=0; blkid -p "$DEV" >/dev/null 2>&1 || rc=$?
-if [ "$rc" -eq 2 ] && [ -z "$(head -c 1048576 "$DEV" | tr -d '\0' | head -c 1)" ]; then mkfs.ext4 -L edh-data "$DEV"
+if [ "$rc" -eq 2 ] && { [ "$FORMAT_NEW" = 1 ] || [ -z "$(head -c 1048576 "$DEV" | tr -d '\0' | head -c 1)" ]; }; then
+  mkfs.ext4 -L edh-data "$DEV"
 elif [ "$rc" -ne 0 ]; then echo "refusing to format $DEV (blkid rc=$rc, not blank)"; exit 1
 fi
 # -p probes the device itself: blkid's cache may not know a filesystem that mkfs made a moment ago
