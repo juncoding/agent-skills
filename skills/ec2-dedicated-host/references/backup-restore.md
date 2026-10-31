@@ -126,7 +126,8 @@ Postgres is not published on the server and there is no SSH. `db.sh tunnel` open
 127.0.0.1 (default port 15432, `--port N`) to the Postgres container; nothing changes on the server (no
 published port, no security-group rule). With a command after `--`, the command runs with
 `DATABASE_URL=postgres://app:…@127.0.0.1:<port>/app` and the libpq variables (`PGHOST`, `PGPORT`, `PGUSER`,
-`PGDATABASE`, `PGPASSWORD`) set for it alone, and the tunnel closes when it ends; the password is read from SSM
+`PGDATABASE`, `PGPASSWORD`; `PGSERVICE` emptied and `PGSSLMODE=prefer` so your own libpq settings can't redirect it) set
+for it alone, and the tunnel closes when it ends; the password is read from SSM
 `<path>/_edh/postgres-password` and never printed or logged. Without a command the tunnel stays open until
 Ctrl-C. Needs the AWS Session Manager plugin.
 

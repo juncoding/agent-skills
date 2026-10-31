@@ -70,11 +70,12 @@ lastop() { tail -n 1 deploy/OPERATIONS.md; }
 
 # ============ with a command: it runs with DATABASE_URL and the libpq variables set
 newport
-out=$(run tunnel --port "$PORT" -- sh -c 'echo "URL=$DATABASE_URL"; echo "PG=$PGHOST $PGPORT $PGUSER $PGDATABASE"; echo "PGPASSWORD=$PGPASSWORD"'); rc=$?
+out=$(run tunnel --port "$PORT" -- sh -c 'echo "URL=$DATABASE_URL"; echo "PG=$PGHOST $PGPORT $PGUSER $PGDATABASE"; echo "PGPASSWORD=$PGPASSWORD"; echo "SVC=[$PGSERVICE] SSL=$PGSSLMODE"'); rc=$?
 assert_status $rc 0 "command: exits 0"
 assert_contains "$out" "URL=postgres://app:stub@127.0.0.1:$PORT/app" "command: gets DATABASE_URL (127.0.0.1)"
 assert_contains "$out" "PG=127.0.0.1 $PORT app app" "command: gets PGHOST PGPORT PGUSER PGDATABASE"
 assert_contains "$out" "PGPASSWORD=stub" "command: gets PGPASSWORD"
+assert_contains "$out" "SVC=[] SSL=prefer" "command: PGSERVICE emptied, PGSSLMODE=prefer"
 
 # ============ the port-forward parameters
 slog=$(cat "$T/log.session")
@@ -130,6 +131,18 @@ assert_status $rc 130 "Ctrl-C (command): exit 130"
 assert_contains "$(lastop)" "db · failed (exit 130) · tunnel → sleep 30" "Ctrl-C (command): oplog failed (exit 130)"
 if port_closed "$PORT"; then pass "Ctrl-C (command): port closed"; else fail "Ctrl-C (command): port $PORT still open"; fi
 assert_eq "$(listeners)" "" "Ctrl-C (command): no tunnel process left"
+
+# ============ Ctrl-C before the tunnel opens (the server lookup is slow): exit 130, logged as failed
+newport
+: > "$T/log"; : > "$T/log.session"
+EDH_SSM_POLL_SECONDS=3 "$T/sigdfl" /bin/bash "$SKILL_DIR/scripts/db.sh" tunnel --port "$PORT" -- true >"$T/out.early" 2>&1 &
+pid=$!
+sleep 1
+kill -INT -- "-$pid" 2>/dev/null
+wait "$pid"; rc=$?
+assert_status $rc 130 "Ctrl-C (early): exit 130"
+assert_contains "$(lastop)" "db · failed (exit 130) · tunnel → true" "Ctrl-C (early): oplog failed (exit 130)"
+assert_eq "$(sessions)" "0" "Ctrl-C (early): no session started"
 
 # ============ hold mode (no command): Ctrl-C is the normal way to close, logged ok
 newport

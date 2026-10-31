@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # db.sh tunnel [--port N] [-- command …]
-# Open an SSM port-forward from localhost:<port> (default 15432) to this client's Postgres container and, with a
+# Open an SSM port-forward from 127.0.0.1:<port> (default 15432) to this client's Postgres container and, with a
 # command, run it with DATABASE_URL=postgres://app:<password>@127.0.0.1:<port>/app and the libpq variables (PGHOST,
 # PGPORT, PGUSER, PGDATABASE, PGPASSWORD; so a bare psql works) set for that command only (the password is read from
 # SSM <path>/_edh/postgres-password and never printed or logged). The command keeps the terminal; the tunnel closes
@@ -33,6 +33,10 @@ if (( ${#CMD[@]} > 0 )); then
   case "${CMD[1]:-}" in ""|*=*|*://*) ;; *) detail="$detail ${CMD[1]}" ;; esac
 fi
 oplog_begin db "$detail"
+# signals, set before the slow steps: bash runs the EXIT trap with $? = 0 after an untrapped SIGINT/SIGTERM, so give
+# them exit codes. With a command, an interrupt is a failure (130/143); without one, Ctrl-C is how the tunnel is
+# closed (0).
+if (( ${#CMD[@]} > 0 )); then trap 'exit 130' INT; trap 'exit 143' TERM; else trap 'exit 0' INT TERM; fi
 require aws
 require_account
 command -v session-manager-plugin >/dev/null \
@@ -57,6 +61,7 @@ fi
 SPID="" slog=""
 # stop_tunnel — end the session: its children first (the AWS CLI runs the Session Manager plugin as a child)
 stop_tunnel() {
+  trap '' INT TERM   # a second Ctrl-C must not cut the cleanup short
   if [[ -n "$SPID" ]]; then
     pkill -P "$SPID" 2>/dev/null || true
     kill "$SPID" 2>/dev/null || true
@@ -64,9 +69,6 @@ stop_tunnel() {
   fi
   if [[ -n "$slog" ]]; then rm -f "$slog"; fi
 }
-# signals: bash runs the EXIT trap with $? = 0 after an untrapped SIGINT/SIGTERM, so give them exit codes. With a
-# command, an interrupt is a failure (130/143); without one, Ctrl-C is how the tunnel is closed (0).
-if (( ${#CMD[@]} > 0 )); then trap 'exit 130' INT; trap 'exit 143' TERM; else trap 'exit 0' INT TERM; fi
 slog=$(mktemp)
 at_exit 'stop_tunnel'
 # `aws` itself, not the awsr function: in the background a function runs in a subshell, and then the plugin would
@@ -90,7 +92,8 @@ if (( ${#CMD[@]} == 0 )); then
 fi
 
 rc=0
+# PGSERVICE empty and PGSSLMODE=prefer: the user's own libpq service file or sslmode must not redirect or break this
 DATABASE_URL="postgres://app:$pw@127.0.0.1:$PORT/app" PGHOST=127.0.0.1 PGPORT="$PORT" PGUSER=app PGDATABASE=app \
-  PGPASSWORD="$pw" "${CMD[@]}" || rc=$?
+  PGPASSWORD="$pw" PGSERVICE="" PGSSLMODE=prefer "${CMD[@]}" || rc=$?
 unset pw
 exit "$rc"
