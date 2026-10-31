@@ -17,4 +17,5 @@ daily_backup_hour_utc: 18
 migrate_cmd: ""              # e.g. npx prisma migrate deploy  (no single quotes)
 dockerfile: Dockerfile
 build_context: .
-prod_branch: main            # env prod deploys only exactly origin/<prod_branch>
+prod_branch: main            # env prod deploys only exactly origin/<prod_branch> (with release_flow: tags, the release branch)
+release_flow: branch         # branch = deploy prod_branch as checked out | tags = release.sh vX.Y.Z fast-forwards prod_branch to a tag on main; deploys build origin/<prod_branch>

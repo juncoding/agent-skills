@@ -59,9 +59,10 @@ Run from the **project root** (the directory holding `deploy/`): `bash <this-ski
 
 | User says | Run | Key flags / notes |
 |---|---|---|
-| "set this up" (first time) | `init.sh --client acme --domain app.example.com --emails ops@example.com --account-id 123456789012` | also `--env`, `--region`, `--gotenberg`, `--app-memory MB`, `--app-port N`, `--migrate "CMD"`, `--monitoring none`, `--no-instance-role`. Never overwrites `deploy/`. |
+| "set this up" (first time) | `init.sh --client acme --domain app.example.com --emails ops@example.com --account-id 123456789012` | also `--env`, `--region`, `--gotenberg`, `--app-memory MB`, `--app-port N`, `--migrate "CMD"`, `--monitoring none`, `--no-instance-role`, `--release-flow tags` (releases by v* tag, below). Never overwrites `deploy/`. |
 | "create the server" | `provision.sh` (plan) → `provision.sh --apply` | plan is read-only; `--apply` only after the user approved the plan + cost |
 | "deploy" / "deploy to prod" | `deploy.sh` | `--maint` (maintenance page during migrations), `--allow-dirty` (in prod only with `--allow-non-main`), `--allow-non-main` (prod emergency only) |
+| "release v1.2.3" (only with `release_flow: tags`) | `release.sh v1.2.3` | `--maint`. Fast-forwards the release branch to the tag, then deploys it. `references/releases.md` |
 | "roll back" | `rollback.sh` | previous image + its env; database untouched; run again to roll forward. Asks first. |
 | "maintenance on/off" | `maint.sh on --message "…" --until "23:00"` / `off` / `status` | `--no-link` hides the bypass link; `rotate-bypass` makes a new token (applied by the next deploy) |
 | "back up now" / "list backups" | `backup.sh now` / `backup.sh list [N]` | `now` writes to `db/daily/` |
@@ -126,6 +127,13 @@ unless the current branch is `main`, HEAD is exactly `origin/main` and the worki
 user asks for it (with uncommitted changes, also `--allow-dirty`). It prints a red EMERGENCY warning naming
 the branch, commit and subject and asks for confirmation (`EDH_YES=1` only after the user said yes). Remind
 them to get the fix into main through their review — the next normal deploy replaces it. Non-prod envs (`env: staging` …) skip the origin/main check.
+
+**With `release_flow: tags`** (`references/releases.md`) the rules above don't apply: prod runs the release
+branch (`prod_branch`, normally `release`), and "release v1.2.3" means `release.sh v1.2.3`. It refuses a tag
+that isn't on origin or isn't on `origin/main`, never moves the release branch backwards and never
+force-pushes; tell the user the refusal and its fix, don't work around it. `deploy.sh` then always builds
+exactly `origin/<prod_branch>` from a clean temporary worktree — the operator's branch and uncommitted work
+don't matter — and the tag becomes the app's `APP_VERSION`. Going back is `rollback.sh` or a new fix tag.
 
 Every deploy prints the commit being deployed (`deploying <sha> "<subject>"`). Use `--maint` when a
 migration is risky or slow: users see the maintenance page while it runs.

@@ -8,6 +8,9 @@
 #                     (emergency hotfix; warns and asks for confirmation — EDH_YES=1 only after the user agreed)
 # env prod: refuses unless the current branch is prod_branch (default main), HEAD equals origin/<prod_branch>
 # (after git fetch) and the working tree is clean.
+# release_flow: tags (any env): builds exactly origin/<prod_branch> (the release branch release.sh moves) from a
+# temporary clean worktree, whatever is checked out here; the v* tag at that commit becomes APP_VERSION.
+# --allow-non-main still builds the working copy (emergency, as above).
 # Exit: 0 live · non-zero on failure: 1 with an ERROR: line for every handled case (the message says whether the
 # previous version is still serving); an unexpected AWS CLI error exits with the CLI's own code.
 # shellcheck source-path=SCRIPTDIR source=lib.sh
@@ -32,7 +35,7 @@ compose_env() {
   env -i ${keep[@]+"${keep[@]}"} "$@"
 }
 
-# check_compose — deploy/compose.yml against the skill's compose rules (assets/host/edh-compose-check.py, the same
+# check_compose — $SRC/deploy/compose.yml against the skill's compose rules (assets/host/edh-compose-check.py, the same
 # check edh-deploy.sh runs on the server with the real values). It works on Compose's own normalized config
 # (docker compose config --format json: anchors, aliases, list styles, interpolation and paths resolved), rendered
 # as the server would: compose.yml alone in a directory with empty app.env/postgres.env, placeholder values for
@@ -42,7 +45,7 @@ check_compose() {
   require_python
   d=$(mktemp -d) || die "mktemp failed"
   mkdir "$d/app"
-  cp deploy/compose.yml "$d/app/compose.yml" || { rm -rf "$d"; die "deploy/compose.yml missing"; }
+  cp "$SRC/deploy/compose.yml" "$d/app/compose.yml" || { rm -rf "$d"; die "deploy/compose.yml missing"; }
   : > "$d/app/app.env"; : > "$d/app/postgres.env"
   set -- EDH_NAME=lintcheck APP_IMAGE=lint:check DOMAIN=lint.example.com MAINT_BYPASS=lint EDH_DATA_DIR=/data \
          APP_PORT=3000 APP_MEMORY_MB=512 COMPOSE_PROFILES=gotenberg
@@ -122,18 +125,76 @@ check_prod_source() {
   OPLOG_DETAIL="$OPLOG_DETAIL (EMERGENCY --allow-non-main: branch ${branch:-detached HEAD})"
 }
 
+# path_in <dir> <path> — <path> inside <dir>, unless it is absolute or <dir> is the project root (.)
+path_in() { if [[ "$1" == . || "$2" == /* ]]; then printf '%s' "$2"; else printf '%s/%s' "$1" "$2"; fi; }
+
+# release_tag <commit> — the highest v* tag on origin that points at <commit> (empty if none)
+release_tag() {
+  GIT_TERMINAL_PROMPT=0 git ls-remote --tags origin 'v*' 2>/dev/null \
+    | awk -v c="$1" '$1 == c { sub("^refs/tags/", "", $2); sub(/\^\{\}$/, "", $2); print $2 }' \
+    | sort -u -V | tail -n 1
+}
+
+# use_release_branch — SRC = a clean worktree of origin/<prod_branch>; the release commit's own deploy.yml applies
+use_release_branch() {
+  local pb="$EDH_PROD_BRANCH" commit tag
+  if ! GIT_TERMINAL_PROMPT=0 git fetch origin "$pb" --quiet; then
+    refuse "could not fetch $pb from origin (on a first release run release.sh vX.Y.Z; else check 'git remote -v', your network and your GitHub access)"
+  fi
+  commit=$(git rev-parse -q --verify 'FETCH_HEAD^{commit}') || die "git fetch origin $pb returned no commit"
+  # from release.sh: origin/<prod_branch> must still be the commit it just released
+  if [[ -n "${EDH_RELEASE_COMMIT:-}" && "$commit" != "$EDH_RELEASE_COMMIT" ]]; then
+    die "origin/$pb moved to $commit while releasing ${EDH_RELEASE_TAG:-} (${EDH_RELEASE_COMMIT:0:12}) — nothing deployed; run deploy.sh to deploy what origin/$pb holds now"
+  fi
+  WT_DIR=$(mktemp -d) || die "mktemp failed"
+  git worktree add --quiet --detach "$WT_DIR/src" "$commit" >/dev/null 2>&1 \
+    || die "could not check out origin/$pb ($commit) into a temporary worktree"
+  SRC="$WT_DIR/src"
+  load_config "$SRC/deploy/deploy.yml"
+  [[ "$EDH_RELEASE_FLOW" == tags && "$EDH_PROD_BRANCH" == "$pb" ]] \
+    || refuse "origin/$pb's deploy/deploy.yml does not say release_flow: tags with prod_branch: $pb — release a commit that does"
+  tag="${EDH_RELEASE_TAG:-}"
+  if [[ -z "$tag" ]]; then tag=$(release_tag "$commit"); fi
+  [[ -n "$tag" ]] || warn "no v* tag on origin points at origin/$pb ($commit): APP_VERSION stays empty"
+  [[ -z "$tag" || "$tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] || die "unexpected tag name: '$tag'"
+  EDH_APP_VERSION="$tag"
+}
+
+cleanup() {
+  if [[ -n "${tgz:-}" ]]; then rm -f "$tgz"; fi
+  if [[ -n "$WT_DIR" ]]; then
+    git worktree remove --force "$WT_DIR/src" >/dev/null 2>&1 || true
+    rm -rf "$WT_DIR"; git worktree prune >/dev/null 2>&1 || true
+  fi
+}
+SRC=. WT_DIR="" EDH_APP_VERSION="" tgz=""
+at_exit cleanup
+git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repository (run from the project root)"
+RELEASE_MODE=0
+if [[ "$EDH_RELEASE_FLOW" == tags ]] && (( ! NON_MAIN_OK )); then
+  (( ! DIRTY_OK )) || refuse "with release_flow: tags the build ignores the working copy; --allow-dirty works only together with --allow-non-main (emergency)"
+  RELEASE_MODE=1
+  use_release_branch
+fi
 check_compose
-SHA=$(git rev-parse --short=12 HEAD) || die "not a git repository (run from the project root)"
-OPLOG_DETAIL="$SHA \"$(git log -1 --format=%s HEAD)\""
+SHA=$(git -C "$SRC" rev-parse --short=12 HEAD) || die "cannot read the commit to build"
+FULL_SHA=$(git -C "$SRC" rev-parse HEAD)
+SUBJECT=$(git -C "$SRC" log -1 --format=%s HEAD)
+OPLOG_DETAIL="$SHA \"$SUBJECT\""
 DIRTY=0
 # deploy/OPERATIONS.md doesn't count: deploys append to it, and that must not block the next deploy
-if [[ -n "$(git status --porcelain -- . ':(exclude)deploy/OPERATIONS.md')" ]]; then
+if (( ! RELEASE_MODE )) && [[ -n "$(git status --porcelain -- . ':(exclude)deploy/OPERATIONS.md')" ]]; then
   (( DIRTY_OK )) || refuse "uncommitted changes — commit first, or pass --allow-dirty"
-  DIRTY=1; SHA="${SHA}-dirty$(date +%s)"; OPLOG_DETAIL="$SHA ${OPLOG_DETAIL#* }"
+  DIRTY=1; SHA="${SHA}-dirty$(date +%s)"; FULL_SHA="${FULL_SHA}-dirty"; OPLOG_DETAIL="$SHA ${OPLOG_DETAIL#* }"
 fi
 [[ "$SHA" =~ ^[0-9a-f]+(-dirty[0-9]+)?$ ]] || die "unexpected commit id: '$SHA'"   # goes into the remote script
-if [[ "$EDH_ENV" == prod ]]; then check_prod_source "$DIRTY"; fi
-log "deploying ${SHA%%-dirty*} \"$(git log -1 --format=%s HEAD)\" to $EDH_NAME$( [[ "$SHA" == *-dirty* ]] && echo ' (with uncommitted changes)')"
+if [[ "$EDH_ENV" == prod ]] && (( ! RELEASE_MODE )); then check_prod_source "$DIRTY"; fi
+if (( RELEASE_MODE )); then
+  OPLOG_DETAIL="${EDH_APP_VERSION:-untagged} ($SHA) \"$SUBJECT\""
+  log "deploying ${EDH_APP_VERSION:-untagged} (origin/$EDH_PROD_BRANCH at $SHA \"$SUBJECT\") to $EDH_NAME"
+else
+  log "deploying ${SHA%%-dirty*} \"$SUBJECT\" to $EDH_NAME$( [[ "$SHA" == *-dirty* ]] && echo ' (with uncommitted changes)')"
+fi
 ACCT=$(aws_account)
 require_instance
 REG="${ACCT}.dkr.ecr.${EDH_REGION}.amazonaws.com"
@@ -146,11 +207,11 @@ if [[ "$dns" != "$ip" ]]; then warn "$EDH_DOMAIN resolves to '${dns:-nothing}', 
 
 log "1/4 build + push $IMAGE"
 aws ecr get-login-password --region "$EDH_REGION" | docker login --username AWS --password-stdin "$REG" >/dev/null
-docker buildx build --platform linux/arm64 -f "$EDH_DOCKERFILE" -t "$IMAGE" --push "$EDH_BUILD_CONTEXT"
+docker buildx build --platform linux/arm64 -f "$(path_in "$SRC" "$EDH_DOCKERFILE")" --build-arg "GIT_SHA=$FULL_SHA" \
+  -t "$IMAGE" --push "$(path_in "$SRC" "$EDH_BUILD_CONTEXT")"
 
 log "2/4 ship config bundle"
-tgz=$(make_bundle "$SHA")
-at_exit 'rm -f "$tgz"'
+tgz=$(make_bundle "$SHA" "$SRC")
 # s3api with --expected-bucket-owner: bucket names are global, the bundle only goes to this account's bucket
 awsr s3api put-object --bucket "$BUCKET" --key "_edh/bundles/$SHA.tgz" --body "$tgz" --expected-bucket-owner "$ACCT" >/dev/null
 

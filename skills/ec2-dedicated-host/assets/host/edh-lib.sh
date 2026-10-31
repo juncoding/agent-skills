@@ -85,7 +85,8 @@ sha256_of() {
 
 # app_env_defaults — app.env lines so far on stdin; prints the defaults the app gets for names it hasn't set
 # itself through SSM (a secret of the same name always wins): AWS_REGION, EDH_UPLOADS_BUCKET (this client's
-# uploads bucket; left out without a valid account id) and, with Gotenberg, GOTENBERG_URL.
+# uploads bucket; left out without a valid account id), with Gotenberg GOTENBERG_URL and, for a release
+# (release_flow: tags), APP_VERSION (the v* tag).
 app_env_defaults() {
   local have
   have=$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p')
@@ -97,4 +98,5 @@ app_env_defaults() {
     log "EDH_NAME or EDH_ACCOUNT_ID not set: EDH_UPLOADS_BUCKET not added to app.env"
   fi
   if [[ "${EDH_USES_GOTENBERG:-false}" == true ]]; then set_default GOTENBERG_URL http://gotenberg:3000; fi
+  if [[ -n "${EDH_APP_VERSION:-}" ]]; then set_default APP_VERSION "$EDH_APP_VERSION"; fi
 }

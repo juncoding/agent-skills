@@ -125,6 +125,7 @@ load_config() {
   EDH_DOCKERFILE=$(cfg_get "$f" dockerfile Dockerfile)
   EDH_BUILD_CONTEXT=$(cfg_get "$f" build_context .)
   EDH_PROD_BRANCH=$(cfg_get "$f" prod_branch main)
+  EDH_RELEASE_FLOW=$(cfg_get "$f" release_flow branch)
   # cfg_get strips matched quotes only, so a value still starting with a quote was never closed.
   local kv var
   for kv in client:EDH_CLIENT env:EDH_ENV region:EDH_REGION account_id:EDH_ACCOUNT_ID domain:EDH_DOMAIN \
@@ -133,7 +134,7 @@ load_config() {
             uses_gotenberg:EDH_USES_GOTENBERG app_uses_instance_role:EDH_APP_USES_INSTANCE_ROLE \
             backup_schedule:EDH_BACKUP_SCHEDULE \
             daily_backup_hour_utc:EDH_DAILY_HOUR_UTC migrate_cmd:EDH_MIGRATE_CMD dockerfile:EDH_DOCKERFILE \
-            build_context:EDH_BUILD_CONTEXT prod_branch:EDH_PROD_BRANCH; do
+            build_context:EDH_BUILD_CONTEXT prod_branch:EDH_PROD_BRANCH release_flow:EDH_RELEASE_FLOW; do
     var="${kv#*:}"
     case "${!var}" in \"*|\'*) die "unclosed quote in ${kv%%:*}" ;; esac
   done
@@ -173,6 +174,11 @@ validate_config() {
   [[ "$EDH_PROD_BRANCH" =~ ^[A-Za-z0-9_][A-Za-z0-9._/-]*$ && "$EDH_PROD_BRANCH" != *..* && "$EDH_PROD_BRANCH" != *//* \
      && "$EDH_PROD_BRANCH" != */ && "$EDH_PROD_BRANCH" != *.lock && "$EDH_PROD_BRANCH" != */.* ]] \
     || die "prod_branch must be a git branch name like main: '$EDH_PROD_BRANCH'"
+  [[ "$EDH_RELEASE_FLOW" == branch || "$EDH_RELEASE_FLOW" == tags ]] || die "release_flow must be branch or tags: '$EDH_RELEASE_FLOW'"
+  # tags: release.sh fast-forwards prod_branch to tags on main, so it must be a branch of its own
+  if [[ "$EDH_RELEASE_FLOW" == tags && "$EDH_PROD_BRANCH" == main ]]; then
+    die "with release_flow: tags, prod_branch must not be main (it is the release branch, e.g. prod_branch: release)"
+  fi
   if [[ "$EDH_MONITORING" == cloudwatch && -z "$EDH_ALERT_EMAILS" ]]; then
     die "alert_emails required when monitoring: cloudwatch"
   fi
@@ -372,6 +378,7 @@ release_env() {
   acct=$(aws_account) || return 1
   [[ "$acct" =~ ^[0-9]{12}$ ]] || die "release_env: AWS account is not a 12-digit id: '$acct'"
   [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] || die "release_env: invalid release id: '$1'"
+  [[ "${EDH_APP_VERSION:-}" =~ ^[A-Za-z0-9._-]*$ ]] || die "release_env: invalid app version: '$EDH_APP_VERSION'"
   if [[ "$EDH_MONITORING" == cloudwatch ]]; then topic="arn:aws:sns:$EDH_REGION:$acct:${EDH_PREFIX}-alerts"; fi
   cat <<EOV
 EDH_CLIENT=$EDH_CLIENT
@@ -390,18 +397,19 @@ EDH_USES_GOTENBERG=$EDH_USES_GOTENBERG
 EDH_MIGRATE_CMD='$EDH_MIGRATE_CMD'
 EDH_ALERT_TOPIC_ARN=$topic
 EDH_RELEASE=$1
+EDH_APP_VERSION=${EDH_APP_VERSION:-}
 EOV
 }
 
-# make_bundle <release-id> — tgz of deploy/ (compose.yml, Caddyfile, maint pages) + this skill's host scripts
+# make_bundle <release-id> [source-dir] — tgz of <source-dir>/deploy/ (default: the project root; compose.yml, Caddyfile, maint pages) + this skill's host scripts
 # (every edh-*.sh, edh-*.py and systemd unit; never bootstrap.sh) + release.env; prints its path.
 # Usually called as tgz=$(make_bundle ...), where set -e is off: every step checks its own result.
 make_bundle() {
-  local d
+  local d src="${2:-.}"
   d=$(mktemp -d) || die "make_bundle: mktemp failed"
   mkdir -p "$d/app/maint" "$d/host/systemd" || die "make_bundle: cannot create $d"
-  cp deploy/compose.yml deploy/Caddyfile "$d/app/" || die "make_bundle: deploy/compose.yml or deploy/Caddyfile missing"
-  cp deploy/maint/maintenance.html deploy/maint/down.html "$d/app/maint/" || die "make_bundle: deploy/maint/*.html missing"
+  cp "$src/deploy/compose.yml" "$src/deploy/Caddyfile" "$d/app/" || die "make_bundle: deploy/compose.yml or deploy/Caddyfile missing"
+  cp "$src/deploy/maint/maintenance.html" "$src/deploy/maint/down.html" "$d/app/maint/" || die "make_bundle: deploy/maint/*.html missing"
   cp "$EDH_SKILL_DIR"/assets/host/edh-*.sh "$EDH_SKILL_DIR"/assets/host/edh-*.py "$d/host/" \
     || die "make_bundle: cannot copy the host scripts"
   cp "$EDH_SKILL_DIR"/assets/host/systemd/* "$d/host/systemd/" || die "make_bundle: cannot copy the systemd units"
