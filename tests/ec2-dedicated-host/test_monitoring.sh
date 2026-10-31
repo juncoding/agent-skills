@@ -90,6 +90,8 @@ assert_contains "$(grep 'delete-alarms' "$T/log")" "edh-acme-prod-cpu-surplus-ch
 EDH_SKIP_SSM='' mon add >/dev/null
 s=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' "$T/log.ssm-params" | base64 --decode)
 assert_contains "$s" "amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s" "add installs and starts the CloudWatch agent"
+assert_contains "$s" "> /var/log/edh-cwagent-install.log 2>&1" "agent install chatter (systemd symlinks) goes to a log on the server"
+assert_contains "$s" "tail -n 20 /var/log/edh-cwagent-install.log >&2" "a failed agent install shows the log's tail"
 assert_contains "$s" '"namespace": "CWAgent/acme-prod"' "agent config is shipped inline, with the client's namespace"
 assert_not_contains "$s" "__NAME__" "agent config is rendered"
 assert_contains "$s" '${aws:InstanceId}' "agent config keeps the agent's own \${aws:InstanceId} placeholder"

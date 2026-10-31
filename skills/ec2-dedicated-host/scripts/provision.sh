@@ -266,7 +266,7 @@ make_dlm() {
 
 # bootstrap_state — one SSM check of both markers: 0 done · 3 failed (bootstrap-failed) · anything else: not yet
 bootstrap_state() {
-  ssm_run "$EDH_IID" 60 'if [ -f /var/lib/edh/bootstrap-failed ]; then exit 3; fi; test -f /var/lib/edh/bootstrap-done' >/dev/null
+  EDH_SSM_NO_STDERR=1 ssm_run "$EDH_IID" 60 'if [ -f /var/lib/edh/bootstrap-failed ]; then exit 3; fi; test -f /var/lib/edh/bootstrap-done' >/dev/null
 }
 
 log "provision $EDH_NAME — account $ACCT, region $EDH_REGION — $( (( APPLY )) && echo APPLY || echo 'plan only, nothing changes')"

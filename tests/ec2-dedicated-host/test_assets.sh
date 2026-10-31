@@ -40,6 +40,9 @@ assert_eq "$(printf '%s\n' "$out" | grep -n -e 'rm -f /var/lib/edh/bootstrap-fai
 assert_contains "$out" 'UUID=$(blkid -p -s UUID -o value "$DEV")' "bootstrap reads the UUID with blkid -p"
 assert_not_contains "$out" "fallocate -l 1G /swapfile &&" "swap setup is not an && chain"
 
+assert_contains "$(grep '^pg()' "$SKILL_DIR/assets/host/edh-lib.sh")" "PGOPTIONS=-c client_min_messages=warning" \
+  "pg: no NOTICE chatter (e.g. drop database if exists)"
+
 # the format check itself, with fake blkid / mkfs.ext4 and a file as the device
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 fmt=$(sed -n '/^rc=0; blkid -p/,/^fi$/p' "$SKILL_DIR/assets/host/bootstrap.sh")

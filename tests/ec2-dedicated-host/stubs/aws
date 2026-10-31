@@ -138,7 +138,7 @@ PY
         if [[ -n "${STUB_SSM_OUT+x}" ]]; then printf '%s\n' "$STUB_SSM_OUT"; exit 0; fi
         b64=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' "$STUB_LOG.ssm-params" 2>/dev/null || true)
         if [[ -n "$b64" ]]; then printf '%s' "$b64" | base64 --decode; echo; else echo stub-output; fi ;;
-      *"--query StandardErrorContent"*) echo None ;;
+      *"--query StandardErrorContent"*) echo "${STUB_SSM_ERR:-None}" ;;   # STUB_SSM_ERR: the command's stderr
       *"--query ResponseCode"*)
         # STUB_SSM_RCS="0 4": the nth command's exit code (count in $STUB_LOG.rcn); after the list, STUB_SSM_RC
         if [[ -n "${STUB_SSM_RCS:-}" ]]; then

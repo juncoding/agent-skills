@@ -354,6 +354,7 @@ assert_eq "$(calls 'ssm send-command')" "1" "a malformed key from the server: no
 : > "$T/log"
 out=$(run restore.sh db --key "$KEY_C" --check); rc=$?
 assert_eq "$(script_n 1)" "/opt/edh/bin/edh-restore.sh check $KEY_C --keep" "restore --key goes to the server, which verifies it"
+assert_not_contains "$out" "edh-restore.sh check" "restore --check does not echo the server's raw output (its table count)"
 assert_eq "$(calls list-objects-v2)" "0" "restore --key does not list the bucket"
 : > "$T/log"
 out=$(EDH_YES=1 run restore.sh db --key 'db/daily/app-20261029T180000Z.dump; reboot'); rc=$?

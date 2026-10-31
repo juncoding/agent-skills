@@ -119,7 +119,8 @@ case "${1:-}" in
     fi
     OPLOG_DETAIL="db $( (( check )) && echo check || echo replace) $key${unv}"
     if (( check )); then
-      ssm_run "$EDH_IID" 2400 "/opt/edh/bin/edh-restore.sh check $key --keep$unv" || die "restore check of $key failed (see the output above)"
+      # stdout is only the table count (for the drill); the server's log lines arrive on stderr
+      ssm_run "$EDH_IID" 2400 "/opt/edh/bin/edh-restore.sh check $key --keep$unv" >/dev/null || die "restore check of $key failed (see the output above)"
       ok "restored $key into database app_restore_check (live data untouched)"
     else
       if [[ -n "$unv" ]]; then warn "--unverified: the server restores $key even if its own backup job did not make it"; fi

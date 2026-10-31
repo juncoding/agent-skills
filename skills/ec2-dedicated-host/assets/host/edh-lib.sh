@@ -21,7 +21,7 @@ die() { EDH_DIE_LINE="${BASH_LINENO[0]:-}"; log "ERROR: $*"; exit 1; }
 
 dc() { docker compose --project-directory "$EDH_APP_DIR" -f "$EDH_APP_DIR/compose.yml" "$@"; }
 # pg <sql> [database] — run SQL as the app superuser inside the postgres container
-pg() { dc exec -T postgres psql -v ON_ERROR_STOP=1 -U app -d "${2:-app}" -tAc "$1"; }
+pg() { dc exec -T -e "PGOPTIONS=-c client_min_messages=warning" postgres psql -v ON_ERROR_STOP=1 -U app -d "${2:-app}" -tAc "$1"; }
 
 # edh_lock — one edh operation at a time (deploy, backup, restore, drill), waiting up to 10 min.
 # The lock is held on fd 9 until the script exits; nested edh scripts see EDH_LOCK_HELD=1 and don't lock again.

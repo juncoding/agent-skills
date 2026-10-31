@@ -310,7 +310,8 @@ ssm_run() {
   rm -f "$errf"
   awsr ssm get-command-invocation --command-id "$cid" --instance-id "$iid" --query StandardOutputContent --output text
   err=$(awsr ssm get-command-invocation --command-id "$cid" --instance-id "$iid" --query StandardErrorContent --output text)
-  if [[ -n "$err" && "$err" != None ]]; then printf '%s\n' "$err" >&2; fi
+  # EDH_SSM_NO_STDERR=1: a caller polling with a command expected to fail (exit 1 = "not yet") skips its stderr
+  if [[ -n "$err" && "$err" != None && "${EDH_SSM_NO_STDERR:-}" != 1 ]]; then printf '%s\n' "$err" >&2; fi
   code=$(awsr ssm get-command-invocation --command-id "$cid" --instance-id "$iid" --query ResponseCode --output text)
   [[ "$code" =~ ^-?[0-9]+$ ]] || code=1
   return "$code"

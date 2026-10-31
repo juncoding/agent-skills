@@ -129,12 +129,14 @@ install_agent() { # the script is visible in SSM history: config only, no secret
 cd /tmp
 if ! command -v /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl >/dev/null; then
   curl -fsSLo cwa.deb https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/arm64/latest/amazon-cloudwatch-agent.deb
-  dpkg -i -E cwa.deb && rm -f cwa.deb
+  dpkg -i -E cwa.deb > /var/log/edh-cwagent-install.log 2>&1 || { tail -n 20 /var/log/edh-cwagent-install.log >&2; exit 1; }
+  rm -f cwa.deb
 fi
 cat > /opt/aws/amazon-cloudwatch-agent/etc/edh.json <<'CWAEOF'
 $(render_cwagent)
 CWAEOF
-/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/edh.json" >/dev/null \
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/edh.json \
+  >> /var/log/edh-cwagent-install.log 2>&1 || { tail -n 20 /var/log/edh-cwagent-install.log >&2; exit 1; }" >/dev/null \
     || die "could not install or start the CloudWatch agent on $EDH_IID"
 }
 

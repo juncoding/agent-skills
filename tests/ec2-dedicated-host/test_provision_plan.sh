@@ -84,7 +84,8 @@ assert_eq "$(grep -cE 'iam (create-role|create-instance-profile)' "$T/log")" "0"
 
 # bootstrap failed on the server: fail fast, pointing at the log
 : > "$T/log"
-out=$(STUB_MODE=existing STUB_SSM_RC=3 prov --apply); rc=$?
+out=$(STUB_MODE=existing STUB_SSM_RC=3 STUB_SSM_ERR="failed to run commands: exit status 3" prov --apply); rc=$?
+assert_not_contains "$out" "failed to run commands" "bootstrap polling does not print SSM's raw exit-status lines"
 assert_status $rc 1 "bootstrap failed: apply fails"
 assert_contains "$out" "bootstrap FAILED" "bootstrap failed: explained"
 assert_contains "$out" "/var/log/edh-bootstrap.log" "bootstrap failed: points at the log"
