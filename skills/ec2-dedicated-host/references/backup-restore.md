@@ -120,6 +120,21 @@ tags; upgrade.sh tags its own). **`--foreign-snapshot`** accepts any other snaps
 without tags or copied from elsewhere — after a warning and a confirmation. Make sure it really holds this
 client's data.
 
+## Reaching the database
+
+Postgres is not published on the server and there is no SSH. `db.sh tunnel` opens an SSM port-forward from
+127.0.0.1 (default port 15432, `--port N`) to the Postgres container; nothing changes on the server (no
+published port, no security-group rule). With a command after `--`, the command runs with
+`DATABASE_URL=postgres://app:…@127.0.0.1:<port>/app` and the libpq variables (`PGHOST`, `PGPORT`, `PGUSER`,
+`PGDATABASE`, `PGPASSWORD`; `PGSERVICE` emptied and `PGSSLMODE=prefer` so your own libpq settings can't redirect it) set
+for it alone, and the tunnel closes when it ends; the password is read from SSM
+`<path>/_edh/postgres-password` and never printed or logged. Without a command the tunnel stays open until
+Ctrl-C. Needs the AWS Session Manager plugin.
+
+```bash
+db.sh tunnel -- psql -c 'select 1'      # needs a local psql
+```
+
 ## Monthly restore drill
 
 - **Automatic**: `edh-drill.timer`, the 2nd of each month at 03:30 UTC. It restores the newest hourly/daily
