@@ -44,9 +44,10 @@ command -v session-manager-plugin >/dev/null \
 if (exec 3<>/dev/tcp/127.0.0.1/"$PORT") 2>/dev/null; then refuse "port $PORT is already in use on this machine — pass --port N"; fi
 require_instance
 
-# one IP per network the container is on: the first will do (ssm_run's own errors stay visible above the die)
+# one IP per network the container is on: the first will do; SSM ends the output with a blank line, so the last
+# non-blank line (ssm_run's own errors stay visible above the die)
 ip=$(ssm_run "$EDH_IID" 60 "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' ${EDH_NAME}-postgres-1" \
-  | tail -n 1 | awk '{print $1}') || true
+  | awk 'NF { ip = $1 } END { print ip }') || true
 [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
   || die "could not find the Postgres container ${EDH_NAME}-postgres-1 on $EDH_IID — is the app deployed? (status.sh)"
 
@@ -92,8 +93,10 @@ if (( ${#CMD[@]} == 0 )); then
 fi
 
 rc=0
-# PGSERVICE empty and PGSSLMODE=prefer: the user's own libpq service file or sslmode must not redirect or break this
+# PGSERVICE unset (libpq 18 reads an empty one as a service named "") and PGSSLMODE=prefer: the user's own libpq
+# service file or sslmode must not redirect or break this
+unset PGSERVICE
 DATABASE_URL="postgres://app:$pw@127.0.0.1:$PORT/app" PGHOST=127.0.0.1 PGPORT="$PORT" PGUSER=app PGDATABASE=app \
-  PGPASSWORD="$pw" PGSERVICE="" PGSSLMODE=prefer "${CMD[@]}" || rc=$?
+  PGPASSWORD="$pw" PGSSLMODE=prefer "${CMD[@]}" || rc=$?
 unset pw
 exit "$rc"

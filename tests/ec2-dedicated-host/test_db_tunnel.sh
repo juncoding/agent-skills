@@ -49,7 +49,16 @@ fi
 exec "$TESTS_DIR/stubs/aws" "\$@"
 EOF
 chmod +x "$T/bin/"* "$T/plugin/"* "$T/listen" "$T/sigdfl"
-BASEPATH="$T/bin:$TESTS_DIR/stubs:$PATH"
+# the host PATH minus any dir holding a real session-manager-plugin, so "no plugin" means none (other tools
+# from such a dir are linked into $T/host)
+mkdir -p "$T/host"; HOSTPATH=""
+IFS=: read -ra _dirs <<<"$PATH"
+for _d in "${_dirs[@]}"; do
+  if [[ -x "$_d/session-manager-plugin" ]]; then
+    for _f in "$_d"/*; do [[ "${_f##*/}" == session-manager-plugin || -e "$T/host/${_f##*/}" ]] || ln -s "$_f" "$T/host/"; done
+  else HOSTPATH="${HOSTPATH:+$HOSTPATH:}$_d"; fi
+done
+BASEPATH="$T/bin:$TESTS_DIR/stubs:$T/host:$HOSTPATH"
 export PATH="$T/plugin:$BASEPATH" STUB_LOG="$T/log" STUB_MODE=existing EDH_SSM_POLL_SECONDS=0 STUB_SSM_OUT=172.18.0.3
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com
 
@@ -70,12 +79,12 @@ lastop() { tail -n 1 deploy/OPERATIONS.md; }
 
 # ============ with a command: it runs with DATABASE_URL and the libpq variables set
 newport
-out=$(run tunnel --port "$PORT" -- sh -c 'echo "URL=$DATABASE_URL"; echo "PG=$PGHOST $PGPORT $PGUSER $PGDATABASE"; echo "PGPASSWORD=$PGPASSWORD"; echo "SVC=[$PGSERVICE] SSL=$PGSSLMODE"'); rc=$?
+out=$(PGSERVICE=mine run tunnel --port "$PORT" -- sh -c 'echo "URL=$DATABASE_URL"; echo "PG=$PGHOST $PGPORT $PGUSER $PGDATABASE"; echo "PGPASSWORD=$PGPASSWORD"; echo "SVC=[${PGSERVICE-unset}] SSL=$PGSSLMODE"'); rc=$?
 assert_status $rc 0 "command: exits 0"
 assert_contains "$out" "URL=postgres://app:stub@127.0.0.1:$PORT/app" "command: gets DATABASE_URL (127.0.0.1)"
 assert_contains "$out" "PG=127.0.0.1 $PORT app app" "command: gets PGHOST PGPORT PGUSER PGDATABASE"
 assert_contains "$out" "PGPASSWORD=stub" "command: gets PGPASSWORD"
-assert_contains "$out" "SVC=[] SSL=prefer" "command: PGSERVICE emptied, PGSSLMODE=prefer"
+assert_contains "$out" "SVC=[unset] SSL=prefer" "command: PGSERVICE unset (libpq 18 reads an empty one as a service name), PGSSLMODE=prefer"
 
 # ============ the port-forward parameters
 slog=$(cat "$T/log.session")
@@ -110,6 +119,12 @@ newport
 out=$(STUB_SSM_OUT="172.18.0.3 172.19.0.4 " run tunnel --port "$PORT" -- true); rc=$?
 assert_status $rc 0 "two networks: works"
 assert_contains "$(cat "$T/log.session")" '"host":["172.18.0.3"]' "two networks: the first IP"
+
+# ============ SSM output ends with a blank line (as the real server's does): still the IP
+newport
+out=$(STUB_SSM_OUT=$'172.18.0.3 \n' run tunnel --port "$PORT" -- true); rc=$?
+assert_status $rc 0 "trailing blank line: works"
+assert_contains "$(cat "$T/log.session")" '"host":["172.18.0.3"]' "trailing blank line: the IP"
 
 # ============ a failing command: its exit code, logged
 newport
