@@ -75,7 +75,7 @@ sha=$(git rev-parse --short=12 HEAD)
 img="123456789012.dkr.ecr.ap-southeast-1.amazonaws.com/edh/acme:$sha"
 assert_status $rc 0 "deploy succeeds"
 assert_contains "$out" "live: https://erp.example.com ($sha)" "deploy reports the live site"
-assert_contains "$(cat "$T/log.docker")" "buildx build --platform linux/arm64 -f Dockerfile -t $img --push ." "deploy builds and pushes arm64"
+assert_contains "$(cat "$T/log.docker")" "buildx build --platform linux/arm64 -f Dockerfile --build-arg GIT_SHA=$(git rev-parse HEAD) -t $img --push ." "deploy builds and pushes arm64, passing GIT_SHA"
 assert_eq "$(calls 'sts get-caller-identity')" "1" "deploy checks the account once"
 b="$T/s3/$BUCKET/_edh/bundles/$sha.tgz"
 [[ -f "$b" ]] && pass "bundle uploaded to _edh/bundles/" || fail "bundle not uploaded"

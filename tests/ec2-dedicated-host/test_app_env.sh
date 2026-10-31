@@ -36,4 +36,11 @@ assert_contains "$out" "EDH_UPLOADS_BUCKET=" "the other defaults are still added
 out=$(defaults '' EDH_ACCOUNT_ID=)
 assert_not_contains "$out" "EDH_UPLOADS_BUCKET=" "no account id: no EDH_UPLOADS_BUCKET"
 assert_contains "$out" "AWS_REGION=ap-southeast-1" "no account id: AWS_REGION still added"
+# a release (release_flow: tags): APP_VERSION from the tag, unless the app set it itself
+out=$(defaults $'X=1\n' EDH_APP_VERSION=v1.2.3)
+assert_contains "$out" "APP_VERSION=v1.2.3" "APP_VERSION from the release tag"
+out=$(defaults $'X=1\n')
+assert_not_contains "$out" "APP_VERSION" "no APP_VERSION outside a release"
+out=$(defaults $'APP_VERSION=mine\n' EDH_APP_VERSION=v1.2.3)
+assert_not_contains "$out" "APP_VERSION=v1.2.3" "an APP_VERSION secret wins"
 finish

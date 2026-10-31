@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # init.sh --client NAME --domain FQDN [--emails a@x,b@y] [--env prod] [--region R] [--account-id 123456789012]
 #         [--monitoring cloudwatch|none] [--gotenberg] [--no-instance-role] [--app-memory MB] [--app-port N]
-#         [--migrate "CMD"]
+#         [--migrate "CMD"] [--release-flow branch|tags]
 # Scaffold deploy/ (deploy.yml, compose.yml, Caddyfile, maint pages, OPERATIONS.md) in the current project.
+# --release-flow tags: prod deploys a release branch that release.sh moves to v* tags (sets prod_branch: release).
 # Never overwrites.
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
-client="" domain="" emails="" env=prod region=ap-southeast-1 acct="" monitoring=cloudwatch got=false mem=768 port=3000 migrate="" role=true
+client="" domain="" emails="" env=prod region=ap-southeast-1 acct="" monitoring=cloudwatch got=false mem=768 port=3000 migrate="" role=true flow=branch
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --gotenberg) got=true; shift; continue ;;
     --no-instance-role) role=false; shift; continue ;;
-    --client|--domain|--emails|--env|--region|--account-id|--monitoring|--app-memory|--app-port|--migrate)
+    --client|--domain|--emails|--env|--region|--account-id|--monitoring|--app-memory|--app-port|--migrate|--release-flow)
       [[ $# -ge 2 ]] || die "$1 needs a value" ;;
     *) die "unknown option: $1" ;;
   esac
@@ -22,6 +23,7 @@ while [[ $# -gt 0 ]]; do
     --region) region="$2" ;;       --account-id) acct="$2" ;;
     --monitoring) monitoring="$2" ;; --app-memory) mem="$2" ;;
     --app-port) port="$2" ;;       --migrate) migrate="$2" ;;
+    --release-flow) flow="$2" ;;
   esac
   shift 2
 done
@@ -41,6 +43,8 @@ args=(-e "s#^client: .*#client: $(esc "$client")#" -e "s#^env: .*#env: $(esc "$e
       -e "s#^uses_gotenberg: .*#uses_gotenberg: $got#" -e "s#^app_uses_instance_role: .*#app_uses_instance_role: $role#"
       -e "s#^app_memory_mb: .*#app_memory_mb: $(esc "$mem")#"
       -e "s#^app_port: .*#app_port: $(esc "$port")#" -e "s#^migrate_cmd: .*#migrate_cmd: \"$(esc "$migrate")\"#")
+args+=(-e "s#^release_flow: .*#release_flow: $(esc "$flow")#")
+if [[ "$flow" == tags ]]; then args+=(-e "s#^prod_branch: .*#prod_branch: release#"); fi
 if [[ -n "$acct" ]]; then args+=(-e "s#^account_id: .*#account_id: \"$(esc "$acct")\"#"); fi
 sed "${args[@]}" "$A/deploy.yml" > "$tmp"
 load_config "$tmp"   # validate before anything is created

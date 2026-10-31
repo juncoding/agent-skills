@@ -13,7 +13,7 @@ full Claude Code plugin.
 | Skill | What it does |
 |---|---|
 | [`ec2-docker-host`](skills/ec2-docker-host/) | Run many independent apps side-by-side on **one AWS EC2 box** with Docker — a shared reverse proxy (Caddy + auto-TLS) and shared Postgres/Mongo/Redis, with each app getting its own container, host port, database, and secret namespace. Provision a new host, adopt an existing one, deploy a project (monorepo or polyrepo), and run backups — **without disturbing the apps already running there.** |
-| [`ec2-dedicated-host`](skills/ec2-dedicated-host/) | Run **one client's web app on its own dedicated EC2 server** — from provisioning through deploy, maintenance page, backups and verified restores, monitoring, resizing and OS upgrades. Caddy + app + Postgres (+ optional Gotenberg) in one Compose project, data on a protected EBS volume, no SSH (SSM only), and prod deploys only from `origin/main`. |
+| [`ec2-dedicated-host`](skills/ec2-dedicated-host/) | Run **one client's web app on its own dedicated EC2 server** — from provisioning through deploy, maintenance page, backups and verified restores, monitoring, resizing and OS upgrades. Caddy + app + Postgres (+ optional Gotenberg) in one Compose project, data on a protected EBS volume, no SSH (SSM only), and prod deploys only from `origin/main` (or, opted in, from a release branch moved to `v*` tags). |
 
 More to come.
 
@@ -50,7 +50,7 @@ One client, one server, everything driven from the project's `deploy/deploy.yml`
   security group without SSH, backup + uploads buckets, ECR repo, an encrypted data volume, Elastic IP,
   snapshot policy. Idempotent and re-runnable; nothing tagged `Protect=true` is ever deleted.
 - **Deploy** builds the current commit for arm64, ships it over SSM, takes a safety dump, runs migrations,
-  health-checks and **rolls back automatically**. Prod deploys refuse anything but exactly `origin/main`.
+  health-checks and **rolls back automatically**. Prod deploys refuse anything but exactly `origin/main` — or, with `release_flow: tags`, `release.sh vX.Y.Z` fast-forwards a release branch to a tag on main and deploys exactly that commit.
 - **Maintain**: a branded maintenance page with a bypass link, rollback, secrets from SSM via stdin,
   resizing, OS upgrades with a safety snapshot.
 - **Backups you can trust**: hourly/daily/monthly `pg_dump` to write-once S3, daily/weekly volume snapshots,
