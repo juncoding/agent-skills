@@ -57,7 +57,7 @@ if [[ -n "$iid" ]]; then
 fi
 
 # whatever deploy.yml says now (monitoring may have been switched off since): remove uses exact names and is idempotent
-EDH_YES=1 EDH_OPLOG_SKIP=1 "$BASH" "$(dirname "$0")/monitoring.sh" remove || warn "monitoring removal incomplete"
+EDH_YES=1 EDH_OPLOG_SKIP=1 EDH_TEARDOWN=1 "$BASH" "$(dirname "$0")/monitoring.sh" remove || warn "monitoring removal incomplete"
 if [[ -n "$iid" ]]; then
   awsr ec2 modify-instance-attribute --instance-id "$iid" --no-disable-api-termination
   awsr ec2 terminate-instances --instance-ids "$iid" >/dev/null
@@ -77,7 +77,7 @@ done
 sg=$(awsr ec2 describe-security-groups --filters "Name=group-name,Values=$EDH_PREFIX" --query 'SecurityGroups[0].GroupId' --output text)
 if [[ -n "$sg" && "$sg" != None ]]; then
   guard_not_protected "$sg"
-  awsr ec2 delete-security-group --group-id "$sg" || warn "security group $sg not deleted (it may still be in use for a minute — re-run teardown.sh)"
+  awsr ec2 delete-security-group --group-id "$sg" >/dev/null || warn "security group $sg not deleted (it may still be in use for a minute — re-run teardown.sh)"
 fi
 pol=$(awsr dlm get-lifecycle-policies --target-tags "edh:snapshot=$EDH_NAME" --query 'Policies[0].PolicyId' --output text)
 if [[ -n "$pol" && "$pol" != None ]]; then awsr dlm delete-lifecycle-policy --policy-id "$pol"; ok "snapshot policy removed"; fi

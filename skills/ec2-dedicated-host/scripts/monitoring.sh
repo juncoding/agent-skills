@@ -184,12 +184,14 @@ remove() {
   for id in $(our_health_checks | cut -f1); do aws route53 delete-health-check --health-check-id "$id"; done
   iid=$(instance_id) || iid=""
   if [[ "${EDH_SKIP_SSM:-}" != 1 && -n "$iid" && "$iid" != None && "$iid" != *[[:space:]]* ]]; then
-    ssm_run "$iid" 120 '/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a stop || true' >/dev/null \
+    # not installed when monitoring was never added (or the bootstrap failed): nothing to stop
+    ssm_run "$iid" 120 'c=/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl; if [ -x "$c" ]; then "$c" -a stop || true; fi' >/dev/null \
       || warn "could not stop the CloudWatch agent on $iid"
   fi
   aws iam delete-role-policy --role-name "$ROLE" --policy-name edh-cwagent 2>/dev/null || true   # absent is fine
   ok "monitoring removed"
-  if [[ "$EDH_MONITORING" == cloudwatch ]]; then warn "set 'monitoring: none' in deploy/deploy.yml and redeploy, so the server stops publishing to the deleted topic"; fi
+  # EDH_TEARDOWN=1: the server is being removed, so there is nothing to redeploy
+  if [[ "$EDH_MONITORING" == cloudwatch && "${EDH_TEARDOWN:-}" != 1 ]]; then warn "set 'monitoring: none' in deploy/deploy.yml and redeploy, so the server stops publishing to the deleted topic"; fi
 }
 
 status() {

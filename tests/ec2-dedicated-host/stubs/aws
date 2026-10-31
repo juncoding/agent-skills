@@ -240,6 +240,8 @@ PY
     if [[ "${STUB_MODE:-empty}" == empty ]]; then echo "An error occurred (NoSuchEntity)" >&2; exit 254; fi
     if [[ -n "${STUB_PROFILE_EMPTY:-}" ]]; then echo None; else optval --instance-profile-name; fi ;;
   "cloudwatch put-metric-data") ;;   # the real CLI prints nothing on success
+  "ec2 delete-security-group")   # the real CLI (2.2x+) prints this on success
+    printf '{\n    "Return": true,\n    "GroupId": "%s"\n}\n' "$(optval --group-id)" ;;
   "s3api put-bucket-lifecycle-configuration")   # the real CLI (2.2x+) prints this on success
     printf '{\n    "TransitionDefaultMinimumObjectSize": "all_storage_classes_128K"\n}\n' ;;
   "ec2 run-instances")   # the --user-data file is saved to $STUB_LOG.userdata

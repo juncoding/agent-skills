@@ -6,6 +6,16 @@ mkdir -p "$T/p/deploy"; cp "$SKILL_DIR/assets/project/deploy.yml" "$T/p/deploy/"
 mon() { bash "$SKILL_DIR/scripts/monitoring.sh" "$@" 2>&1; }
 
 # ============ remove: only this client's monitoring resources, never data
+# the agent is stopped only if it is installed (a server whose bootstrap failed, or monitoring never added, has none)
+: > "$T/log"
+EDH_SKIP_SSM=0 mon remove >/dev/null
+stop=$(grep 'ssm send-command' "$T/log" | sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' | head -1 | base64 --decode)
+assert_contains "$stop" '[ -x "$c" ]' "remove stops the CloudWatch agent only if it is installed"
+out=$(EDH_TEARDOWN=1 mon remove); rc=$?
+assert_status $rc 0 "remove during teardown succeeds"
+assert_not_contains "$out" "redeploy" "remove during teardown: no 'redeploy' advice (the server is going away)"
+out=$(mon remove)
+assert_contains "$out" "redeploy" "remove on its own: says to set monitoring: none and redeploy"
 mon remove >/dev/null
 log=$(cat "$T/log")
 assert_contains "$log" "delete-alarms" "remove deletes alarms"
