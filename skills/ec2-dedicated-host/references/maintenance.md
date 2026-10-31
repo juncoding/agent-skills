@@ -66,5 +66,5 @@ the app is really down.
 The page needs Caddy running. While the server is stopped or rebooting — `resize.sh instance` (3–5 min),
 `upgrade.sh os --reboot` (1–2 min), `restore.sh disk` (the whole stack is down for the volume swap) —
 visitors get a connection error. Tell the user beforehand, pick a quiet time, and expect a site-down email
-if monitoring is on and the outage lasts more than ~2 minutes (or `maint.sh on` first to pause that alarm,
+if monitoring is on and the outage lasts more than ~3 minutes (or `maint.sh on` first to pause that alarm,
 then `maint.sh off` afterwards).

@@ -15,7 +15,7 @@ Every alarm emails on ALARM **and** on recovery (OK).
 
 | Alarm | Metric | Fires when | Missing data |
 |---|---|---|---|
-| `edh-acme-prod-site-down` (us-east-1) | Route 53 health check of `https://<domain>/health` (HTTPS, SNI, every 30 s, unhealthy after 3 failures) | `HealthCheckStatus` minimum < 1 in a 1-minute period | breaching |
+| `edh-acme-prod-site-down` (us-east-1) | Route 53 health check of `https://<domain>/health` (HTTPS, SNI, every 30 s, unhealthy after 3 failures) | `HealthCheckStatus` minimum < 1 in a 1-minute period — about 3 min after the site goes down, OK about 4 min after it is back (measured) | breaching |
 | `edh-acme-prod-disk-root-warn` / `-crit` | `CWAgent/acme-prod` `disk_used_percent`, `path=/` | max > 80 % / > 90 % over 5 min | missing |
 | `edh-acme-prod-disk-data-warn` / `-crit` | same, `path=/data` | max > 80 % / > 90 % over 5 min | missing |
 | `edh-acme-prod-mem-high` | `CWAgent/acme-prod` `mem_used_percent` | average > 90 % for 2 × 5 min | missing |

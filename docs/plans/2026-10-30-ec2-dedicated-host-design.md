@@ -1,7 +1,7 @@
 # ec2-dedicated-host — design
 
 Date: 2026-10-30
-Status: implemented; live AWS validation pending
+Status: implemented; validated live on AWS 2026-10-31 (see Validation results)
 
 ## Purpose
 
@@ -118,7 +118,7 @@ services the app needs. `docker compose up -d` brings the whole system up.
 | EC2 status checks | Fail (plus built-in automatic recovery) |
 | Disk `/` and `/data` (CloudWatch agent) | > 80 % warn, > 90 % critical |
 | Memory | > 90 % for 10 min |
-| CPU / credits | > 80 % for 15 min, or t4g credit balance low |
+| CPU / credits | > 80 % for 15 min, or t4g surplus credits charged (see Validation results) |
 | Backup freshness | No success for 2 h |
 
 - Delivered to an SNS topic `<client>-alerts`, email subscriptions, OK notifications on recovery.
@@ -276,7 +276,92 @@ Building and reviewing the skill hardened it well beyond the design. The importa
 
 ## Validation results
 
-Pending (Task 20).
+Live run on 2026-10-31 in ap-southeast-1: a throwaway project (`client: edhtest`, `env: prod`, t4g.small)
+with a small Node app whose `/health` queries Postgres. A local bare git repository stood in for
+GitHub, so the prod "must equal origin/main" rule applied as normal.
+
+### Bugs found and fixed (each with a failing test first)
+
+1. **A new data volume was never formatted** (provisioning failed on every new server). A freshly
+   created encrypted gp3 volume returned non-zero bytes, so the bootstrap's "first 1 MiB is all zeros"
+   check refused it. Now provision tags a volume it creates `edh:fs=new`, and only for that volume
+   the bootstrap formats when `blkid` finds no signature. Every other volume still needs the all-zeros
+   check. After a successful bootstrap the tag becomes `edh:fs=ext4`. (`fd73e57`)
+2. **False CPU-credit alarm on every new server.** A t4g in unlimited mode starts with 0 credits, so
+   `cpu-credits-low` (balance < 50) fired at once, and a low balance doesn't throttle in unlimited
+   mode anyway. It was replaced by `cpu-surplus-charged` (`CPUSurplusCreditsCharged` > 0 in 1 h), which
+   fires only when AWS actually bills the surplus. (`00b01a1`)
+3. **status-check flapped.** With 1-minute periods, one late datapoint counted as breaching. Missing
+   data now keeps the state; a dead server still trips site-down. (`00b01a1`)
+4. **Output noise that would confuse the operator or the agent:**
+   - the JSON results of `put-bucket-lifecycle-configuration` and `delete-security-group`
+   - SSM's `failed to run commands: exit status 1` on every not-yet-done bootstrap poll
+   - systemd's `Created symlink` from the agent install
+   - `restore --check` echoing a bare table count
+   - a psql `NOTICE`
+   - teardown running `amazon-cloudwatch-agent-ctl` on a server without the agent
+   - teardown telling the user to redeploy a server it was removing
+
+   (`fd73e57`, `6fe4f86`, `2f3e694`)
+
+### Main checklist
+
+| # | Check | Result |
+|---|---|---|
+| 1 | init → plan → `--apply`: SSM online, `/data` mounted, DLM policy, confirmation emails | ✅ after fix 1. Emails sent and status reported as pending until clicked |
+| 2 | DNS, deploy, `https://<domain>/health` 200, valid certificate | ✅ Let's Encrypt certificate issued on the first deploy |
+| 3 | `maint.sh on`: page, bypass link, site-down actions off; `off` | ✅ 503 page with the message, `/health` still 200, bypass sets a cookie (302), alarm actions false → true |
+| 4 | Deploy with failing `/health`: exit 2 → rolled back, old version serving, alert | ✅ server exit 2, local "rolled back", site 200 throughout |
+| 5 | `backup.sh now`, `list`, `restore.sh db --latest --check` | ✅ verified against the manifest (sha256 + VersionId), live data untouched |
+| 6 | `monitoring.sh status`; CWAgent disk dimensions match the alarms | ✅ `InstanceId`, `path`, `fstype=ext4` in `CWAgent/<name>` |
+| 7 | Stop the app: site-down alarm, then recovery | ✅ ALARM after ~3.2 min, OK ~4 min after restart (docs said ~2 min, now corrected) |
+| 8 | `resize.sh disk 25`, `status.sh` | ✅ online grow, 25 GB visible |
+| 9 | `teardown.sh`, then manual cleanup | ✅ (twice, with `--keep-ip`) |
+
+### Items the stubs couldn't prove
+
+| # | Item | Result |
+|---|---|---|
+| 1 | `s3:if-none-match` | ✅ PUT without the header is AccessDenied, with it OK, and a repeat returns 412 PreconditionFailed. Delete is denied |
+| 2 | `s3:ResourceAccount` | ✅ no unexpected denies in any run |
+| 3 | Generated secrets are 40 characters | ✅ |
+| 4 | Another client's SSM parameter, from the host and from the app container | ✅ AccessDenied from both. `/aws/service/*` resolves; SSM and Run Command work |
+| 5 | Ubuntu 24.04 `docker-compose-v2` ≥ 2.30 | ✅ 2.40.3 |
+| 6 | snap AWS CLI: `--if-none-match`, `/snap/bin` on PATH for systemd and SSM | ✅ the hourly timer uploaded and published BackupFresh |
+| 7 | `/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol…` on t4g | ✅ |
+| 8 | `head-bucket` error text | ✅ `(404)` for a missing bucket, `(403)` for a foreign one |
+| 9 | DLM policy: cron and tag keys with a colon | ✅ accepted. Snapshot creation (daily 18:30 UTC) falls outside the test window, not observed |
+| 10 | `run-instances` right after `create-instance-profile` | ✅ |
+| 11 | Hop limit 1 vs 2 | ✅ hop 1: the app's SDK gets `CredentialsProviderError`. Hop 2: an S3 round trip works |
+| 12 | A replacement server reuses the data volume without reformatting | ✅ teardown then provision: no mkfs, earlier rows intact |
+| 13 | Metric namespaces | ✅ the host may write only `EDH/<name>` and `CWAgent/<name>`. `CWAgent`, `EDH/<other>` and `CWAgent/<other>` are denied |
+| 14 | Lifecycle configurations accepted | ✅ six rules on backups, noncurrent rule on uploads |
+| 15 | Boot without the data volume: Docker stays down | ✅ docker inactive, `/data` empty, nothing on the root disk |
+| 16, 20 | `restore.sh disk --snapshot` | ✅ swap, remount, Docker back, `/health` 200. A row added after the snapshot is gone. The old volume is kept as `data-replaced-<date>`. The new volume keeps `edh:snapshot`, so DLM still covers it |
+| 17 | Forced bootstrap failure | ✅ (real, see fix 1) `bootstrap-failed` marker. Provision failed on the first poll. dpkg lock and snap seed waits fine on first boot |
+| 18 | `describe-instance-types` arm64, default subnets | ✅ |
+| 19 | `upgrade.sh os --reboot` | ✅ no reboot when none is needed. With `/var/run/reboot-required` present: rebooted, detected, healthy |
+| 21 | Rebuild after teardown, `--keep-ip` | ✅ same IP reused, DNS unchanged |
+| 22 | App SDK uses the injected `AWS_REGION` and `EDH_UPLOADS_BUCKET` with the role | ✅ |
+| 23 | `docker compose config --format json` and a pinned caddy for `caddy validate` | ✅ (every deploy validated) |
+| 24 | SNS `PendingConfirmation` reporting | ✅ in both regions. Unsubscribing a removed address was not exercised live (stub-tested) |
+| 25 | Route 53 health check | ✅ HTTPS, 30 s, failure threshold 3, no latency measurement (standard pricing) |
+| 26 | `memory.peak` path | ✅ `/sys/fs/cgroup/system.slice/docker-<id>.scope/memory.peak` |
+| 27 | Bypass link without a TTY | prints the link on stdout (the operator needs it). Treat it as a secret in shared output |
+| 28 | Missing backup key under the no-ListBucket policy | ✅ S3 answers 403, as designed |
+| 29 | Server-side compose check under `env -i` | ✅ `config --variables` works locally and on Ubuntu, so no fallback scan was needed |
+| 30 | Ownership checks on later deploys | ✅ (five deploys) |
+| 31 | OPERATIONS.md: one line per command | ✅ including a failed provision, a failed build and a rolled-back deploy |
+
+### Observations (not bugs)
+
+- Teardown deletes the SNS topics, so a rebuild sends new confirmation emails, and the old
+  confirmations no longer apply.
+- On a new server, `site-down` and `backup-stale` are in ALARM until the first deploy and the first
+  hourly backup after it. `monitoring.sh add` now says so.
+- The deploy output includes Docker's "credentials are stored unencrypted" warning from `docker login`
+  on the server. That 12-hour ECR token sits in `/root/.docker/config.json`.
+- Not verified by email in this run: alert emails need the subscription confirmed by the recipient.
 
 ## Out of scope (for now)
 
