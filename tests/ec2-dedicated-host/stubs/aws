@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+# Fake `aws` CLI for tests. Logs every call; emulates a few calls; STUB_MODE=empty|existing.
+# STUB_READONLY=1 refuses (exit 99, logged as "STUB_READONLY refused") every call that isn't describe-/get-/list-/head-.
+echo "aws $*" >> "${STUB_LOG:?STUB_LOG not set}"
+args=("$@")
+# drop global options so $1 $2 are service + verb
+clean=(); i=0
+while (( i < ${#args[@]} )); do
+  case "${args[$i]}" in --region|--profile|--output|--query) i=$((i + 2));; *) clean+=("${args[$i]}"); i=$((i + 1));; esac
+done
+svc="${clean[0]:-}"; verb="${clean[1]:-}"
+if [[ "${STUB_READONLY:-}" == 1 ]]; then
+  case "$verb" in
+    describe-*|get-*|list-*|head-*) ;;
+    *) echo "STUB_READONLY refused: aws $*" >> "$STUB_LOG"; echo "stub: read-only: $svc $verb refused" >&2; exit 99 ;;
+  esac
+fi
+# STUB_FAIL_VERB=<verb>: that call fails
+if [[ -n "${STUB_FAIL_VERB:-}" && "$verb" == "$STUB_FAIL_VERB" ]]; then
+  echo "An error occurred (StubFailure) when calling $svc $verb: STUB_FAIL_VERB" >&2; exit 254
+fi
+# optval <option> — the value after <option> in this call
+optval() { local j=0; while (( j < ${#clean[@]} )); do if [[ "${clean[$j]}" == "$1" ]]; then echo "${clean[$((j + 1))]}"; return; fi; j=$((j + 1)); done; }
+s3path() { if [[ "$1" == s3://* ]]; then echo "${STUB_S3:?}/${1#s3://}"; else echo "$1"; fi; }
+
+case "$svc $verb" in
+  "sts get-caller-identity")
+    if [[ -n "${STUB_STS_FAIL:-}" ]]; then echo "stub: sts failure" >&2; exit 255; fi
+    echo "${STUB_ACCOUNT:-123456789012}" ;;
+  "s3 cp")
+    pos=(); for a in "${clean[@]:2}"; do [[ "$a" == --* ]] || pos+=("$a"); done
+    # STUB_S3_FAIL=1: uploads (destination s3://...) fail
+    if [[ -n "${STUB_S3_FAIL:-}" && "${pos[1]}" == s3://* ]]; then echo "stub: upload failed" >&2; exit 1; fi
+    src=$(s3path "${pos[0]}"); dst=$(s3path "${pos[1]}")
+    if [[ "$src" == - ]]; then mkdir -p "$(dirname "$dst")"; cat > "$dst"
+    elif [[ "$dst" == - ]]; then cat "$src"
+    else mkdir -p "$(dirname "$dst")"; cp "$src" "$dst"; fi ;;
+  "s3api put-object")
+    # stores --body at $STUB_S3/<bucket>/<key> like `s3 cp`; with --if-none-match an existing key fails
+    # (S3 conditional write: PreconditionFailed). STUB_S3_FAIL=1 fails every upload.
+    bucket="" key="" body="" inm=""
+    i=2
+    while (( i < ${#clean[@]} )); do
+      case "${clean[$i]}" in
+        --bucket) bucket="${clean[$((i + 1))]}"; i=$((i + 2)) ;;
+        --key) key="${clean[$((i + 1))]}"; i=$((i + 2)) ;;
+        --body) body="${clean[$((i + 1))]}"; i=$((i + 2)) ;;
+        --if-none-match) inm="${clean[$((i + 1))]}"; i=$((i + 2)) ;;
+        *) i=$((i + 1)) ;;
+      esac
+    done
+    if [[ -n "${STUB_S3_FAIL:-}" ]]; then echo "stub: upload failed" >&2; exit 1; fi
+    dst="${STUB_S3:?}/$bucket/$key"
+    if [[ -n "$inm" && -e "$dst" ]]; then
+      echo "An error occurred (PreconditionFailed) when calling the PutObject operation: At least one of the pre-conditions you specified did not hold" >&2
+      exit 254
+    fi
+    mkdir -p "$(dirname "$dst")"; cp "$body" "$dst"
+    # each upload is also kept as a version: $STUB_S3/.versions/<bucket>/<key>/<VersionId> (v1, v2, ...)
+    vdir="$STUB_S3/.versions/$bucket/$key"; mkdir -p "$vdir"
+    vid="v$(( $(ls "$vdir" | wc -l) + 1 ))"; cp "$body" "$vdir/$vid"
+    if [[ "$*" == *"--query VersionId"* ]]; then echo "$vid"; else echo "{ \"ETag\": \"stub\", \"VersionId\": \"$vid\" }"; fi ;;
+  "s3api get-object")
+    # get-object --bucket B --key K [--version-id V] OUTFILE: a version from $STUB_S3/.versions, else the current object
+    bucket="" key="" ver="" out=""
+    i=2
+    while (( i < ${#clean[@]} )); do
+      case "${clean[$i]}" in
+        --bucket) bucket="${clean[$((i + 1))]}"; i=$((i + 2)) ;;
+        --key) key="${clean[$((i + 1))]}"; i=$((i + 2)) ;;
+        --version-id) ver="${clean[$((i + 1))]}"; i=$((i + 2)) ;;
+        --*) i=$((i + 2)) ;;
+        *) out="${clean[$i]}"; i=$((i + 1)) ;;
+      esac
+    done
+    if [[ -n "$ver" ]]; then src="${STUB_S3:?}/.versions/$bucket/$key/$ver"; else src="${STUB_S3:?}/$bucket/$key"; fi
+    if [[ ! -f "$src" ]]; then
+      echo "An error occurred (NoSuchKey) when calling the GetObject operation: The specified key does not exist." >&2; exit 254
+    fi
+    cp "$src" "$out"
+    echo "{ \"VersionId\": \"${ver:-current}\" }" ;;
+  "s3api head-bucket")
+    # STUB_BUCKET=foreign: the bucket exists in another account (403); else exists (existing) / missing (empty)
+    if [[ "${STUB_BUCKET:-}" == foreign ]]; then
+      echo "An error occurred (403) when calling the HeadBucket operation: Forbidden" >&2; exit 254
+    fi
+    if [[ "${STUB_MODE:-empty}" == empty ]]; then
+      echo "An error occurred (404) when calling the HeadBucket operation: Not Found" >&2; exit 254
+    fi ;;
+  "s3api list-objects-v2")
+    # $STUB_S3_LIST: the rows to return ("Key<TAB>LastModified<TAB>Size"), filtered by --prefix; default: none
+    if [[ -n "${STUB_S3_LIST:-}" ]]; then
+      pfx=$(optval --prefix)
+      awk -v p="$pfx" 'index($0, p) == 1' "$STUB_S3_LIST"
+    else
+      echo None
+    fi ;;
+  "s3 ls")
+    p="${clean[2]#s3://}"; b="${p%%/*}"
+    [[ -d "$STUB_S3/$b" ]] && (cd "$STUB_S3/$b" || exit; find . -type f | sed 's#^\./##' | sort | while read -r k; do echo "2026-01-01 00:00:00 1 $k"; done) ;;
+  "ssm get-parameters-by-path")
+    # $STUB_SSM: one "name<TAB>value" per line; in a value, \n and \t stand for a newline and a tab.
+    # Printed like the CLI: JSON by default, name<TAB>value lines with --output text.
+    if [[ "$*" == *"--output text"* ]]; then cat "${STUB_SSM:-/dev/null}"; exit 0; fi
+    /usr/bin/env python3 -I - "${STUB_SSM:-/dev/null}" <<'PY'
+import json, sys
+params = []
+for line in open(sys.argv[1]).read().splitlines():
+    if line:
+        name, _, value = line.partition("\t")
+        params.append({"Name": name, "Type": "SecureString",
+                       "Value": value.replace("\\n", "\n").replace("\\t", "\t")})
+print(json.dumps({"Parameters": params}))
+PY
+    ;;
+  "ssm send-command")
+    # STUB_SSM_SEND_FAIL=1 fails; otherwise the --parameters JSON is saved to $STUB_LOG.ssm-params
+    if [[ "${STUB_SSM_SEND_FAIL:-}" == 1 ]]; then echo "stub: send-command failure" >&2; exit 255; fi
+    i=0
+    while (( i < ${#clean[@]} )); do
+      if [[ "${clean[$i]}" == --parameters ]]; then printf '%s\n' "${clean[$((i + 1))]}" > "$STUB_LOG.ssm-params"; fi
+      i=$((i + 1))
+    done
+    echo cmd-stub ;;
+  "ssm get-command-invocation")
+    # answers by --query: the command always succeeds; its output is the script that was sent.
+    # STUB_SSM_POLL_FAIL=<n>: the first n Status polls fail with STUB_SSM_POLL_ERR (count kept in $STUB_LOG.polls)
+    if [[ -n "${STUB_SSM_POLL_FAIL:-}" && "$*" == *"--query Status"* ]]; then
+      n=$(cat "$STUB_LOG.polls" 2>/dev/null || echo 0)
+      if (( n < STUB_SSM_POLL_FAIL )); then
+        echo $((n + 1)) > "$STUB_LOG.polls"
+        echo "${STUB_SSM_POLL_ERR:-stub: poll failure}" >&2; exit 255
+      fi
+    fi
+    case "$*" in
+      *"--query StandardOutputContent"*)
+        # STUB_SSM_OUT: the command's output; default: the script that was sent
+        if [[ -n "${STUB_SSM_OUT+x}" ]]; then printf '%s\n' "$STUB_SSM_OUT"; exit 0; fi
+        b64=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' "$STUB_LOG.ssm-params" 2>/dev/null || true)
+        if [[ -n "$b64" ]]; then printf '%s' "$b64" | base64 --decode; echo; else echo stub-output; fi ;;
+      *"--query StandardErrorContent"*) echo "${STUB_SSM_ERR:-None}" ;;   # STUB_SSM_ERR: the command's stderr
+      *"--query ResponseCode"*)
+        # STUB_SSM_RCS="0 4": the nth command's exit code (count in $STUB_LOG.rcn); after the list, STUB_SSM_RC
+        if [[ -n "${STUB_SSM_RCS:-}" ]]; then
+          n=$(( $(cat "$STUB_LOG.rcn" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STUB_LOG.rcn"
+          # shellcheck disable=SC2086
+          set -- $STUB_SSM_RCS
+          if (( n <= $# )); then echo "${!n}"; exit 0; fi
+        fi
+        echo "${STUB_SSM_RC:-0}" ;;
+      *) echo Success ;;
+    esac ;;
+  "ec2 describe-tags")
+    case "$*" in
+      *vol-error*) echo "stub: describe-tags failure" >&2; exit 255 ;;
+      *vol-protected*) echo true ;;
+      *vol-upper*) echo TRUE ;;
+      *) echo None ;;
+    esac ;;
+  "ecr get-login-password") echo stub ;;
+  # --- route53: health checks kept in $STUB_LOG.r53 ("id<TAB>domain<TAB>path<TAB>client<TAB>env<TAB>managed-by"); a caller
+  # reference can be used once ever, like in Route 53 (even after the check is deleted)
+  "route53 create-health-check")
+    ref=$(optval --caller-reference); cfg=$(optval --health-check-config)
+    if [[ -n "${STUB_R53_FAIL:-}" ]]; then echo "An error occurred (InvalidInput) when calling the CreateHealthCheck operation: stub" >&2; exit 254; fi
+    if grep -qxF -- "$ref" "$STUB_LOG.r53refs" 2>/dev/null; then
+      echo "An error occurred (HealthCheckAlreadyExists) when calling the CreateHealthCheck operation: reference $ref was used before" >&2; exit 254
+    fi
+    echo "$ref" >> "$STUB_LOG.r53refs"
+    n=$(( $(cat "$STUB_LOG.r53n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STUB_LOG.r53n"
+    d=$(printf '%s' "$cfg" | tr ',' '\n' | sed -n 's/^FullyQualifiedDomainName=//p')
+    p=$(printf '%s' "$cfg" | tr ',' '\n' | sed -n 's/^ResourcePath=//p')
+    printf 'hc-%s\t%s\t%s\tNone\tNone\tNone\n' "$n" "$d" "$p" >> "$STUB_LOG.r53"
+    echo "hc-$n" ;;
+  "route53 list-health-checks")
+    if [[ -s "$STUB_LOG.r53" ]]; then cut -f1-3 "$STUB_LOG.r53"; else echo None; fi ;;
+  "route53 list-tags-for-resources")   # one "id<TAB>edh:client<TAB>edh:env<TAB>ManagedBy" row per requested id
+    i=0; ids=()
+    while (( i < ${#clean[@]} )); do
+      if [[ "${clean[$i]}" == --resource-ids ]]; then
+        i=$((i + 1)); while (( i < ${#clean[@]} )) && [[ "${clean[$i]}" != --* ]]; do ids+=("${clean[$i]}"); i=$((i + 1)); done
+      else i=$((i + 1)); fi
+    done
+    for id in "${ids[@]}"; do awk -F'\t' -v i="$id" '$1 == i { print $1 "\t" $4 "\t" $5 "\t" ($6 == "" ? "None" : $6) }' "$STUB_LOG.r53" 2>/dev/null; done ;;
+  "route53 change-tags-for-resource")
+    id=$(optval --resource-id); c=$(printf '%s ' "${clean[@]}" | sed -n 's/.*Key=edh:client,Value=\([^ ]*\).*/\1/p')
+    e=$(printf '%s ' "${clean[@]}" | sed -n 's/.*Key=edh:env,Value=\([^ ]*\).*/\1/p')
+    mb=$(printf '%s ' "${clean[@]}" | sed -n 's/.*Key=ManagedBy,Value=\([^ ]*\).*/\1/p')
+    if [[ -f "$STUB_LOG.r53" ]]; then
+      awk -F'\t' -v OFS='\t' -v i="$id" -v c="${c:-}" -v e="${e:-}" -v m="${mb:-}" '$1 == i { if (c != "") $4 = c; if (e != "") $5 = e; if (m != "") $6 = m } { print }' \
+        "$STUB_LOG.r53" > "$STUB_LOG.r53.new" && mv "$STUB_LOG.r53.new" "$STUB_LOG.r53"
+    fi ;;
+  "route53 delete-health-check")
+    id=$(optval --health-check-id)
+    if [[ -f "$STUB_LOG.r53" ]]; then awk -F'\t' -v i="$id" '$1 != i' "$STUB_LOG.r53" > "$STUB_LOG.r53.new"; mv "$STUB_LOG.r53.new" "$STUB_LOG.r53"; fi ;;
+  "sns list-subscriptions-by-topic")   # STUB_SNS_SUBS: "protocol<TAB>endpoint<TAB>subscription-arn" lines (default: none)
+    if [[ -n "${STUB_SNS_SUBS:-}" ]]; then printf '%s\n' "$STUB_SNS_SUBS"; else echo None; fi ;;
+  "ec2 describe-snapshots")   # STUB_SNAP_TAGS: the snapshot's edh:client<TAB>edh:env (default: acme, prod)
+    printf '%s\n' "${STUB_SNAP_TAGS:-acme	prod}" ;;
+  "ec2 create-volume") echo vol-new ;;
+  "ec2 attach-volume")   # STUB_ATTACH_FAIL=1: refused
+    if [[ -n "${STUB_ATTACH_FAIL:-}" ]]; then echo "An error occurred (IncorrectState) when calling the AttachVolume operation: stub" >&2; exit 254; fi
+    echo attaching ;;
+  "ec2 start-instances")   # STUB_START_FAIL=1: the first start fails (count in $STUB_LOG.starts)
+    n=$(( $(cat "$STUB_LOG.starts" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STUB_LOG.starts"
+    if [[ -n "${STUB_START_FAIL:-}" ]] && (( n == 1 )); then
+      echo "An error occurred (InsufficientInstanceCapacity) when calling the StartInstances operation: stub" >&2; exit 254
+    fi
+    echo starting ;;
+  "iam get-role")   # STUB_NO_ROLE=1: the role is gone
+    if [[ "${STUB_MODE:-empty}" == empty || -n "${STUB_NO_ROLE:-}" ]]; then echo "An error occurred (NoSuchEntity)" >&2; exit 254; fi
+    echo stub ;;
+  "iam list-attached-role-policies")   # STUB_ATTACHED_POLICIES: the attached policy ARNs
+    printf '%s\n' "${STUB_ATTACHED_POLICIES:-arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore}" ;;
+  # --- provision.sh
+  "ec2 describe-instance-type-offerings") printf '%s\n' "${STUB_OFFERED_AZS:-ap-southeast-1a	ap-southeast-1b	ap-southeast-1c}" ;;
+  "ec2 describe-instance-types") echo "${STUB_ARCH:-arm64}" ;;
+  "ec2 describe-subnets")   # default subnets in 1b and 1c (STUB_SUBNET_AZS); STUB_NO_SUBNET=1: the id lookup finds none
+    case "$*" in
+      *SubnetId*) if [[ -n "${STUB_NO_SUBNET:-}" ]]; then echo None; else echo subnet-stub; fi ;;
+      *) printf '%s\n' "${STUB_SUBNET_AZS:-ap-southeast-1b	ap-southeast-1c}" ;;
+    esac ;;
+  "ec2 authorize-security-group-ingress")   # STUB_SG_DUP=1: the rule already exists
+    if [[ -n "${STUB_SG_DUP:-}" ]]; then
+      echo "An error occurred (InvalidPermission.Duplicate) when calling the AuthorizeSecurityGroupIngress operation: the specified rule already exists" >&2
+      exit 254
+    fi ;;
+  "ssm get-parameter")   # empty mode: not found; STUB_NO_SECRETS=1: the _edh/* secrets are missing
+    if [[ "${STUB_MODE:-empty}" == empty || ( -n "${STUB_NO_SECRETS:-}" && "$(optval --name)" == */_edh/* ) ]]; then
+      echo "An error occurred (ParameterNotFound) when calling the GetParameter operation:" >&2; exit 254
+    fi
+    echo stub ;;
+  "ssm put-parameter")   # a --value file://<path> is saved to $STUB_LOG.params/<name with / as _>
+    v=$(optval --value)
+    if [[ "$v" == file://* ]]; then
+      mkdir -p "$STUB_LOG.params"; cp "${v#file://}" "$STUB_LOG.params/$(optval --name | tr / _)"
+    fi
+    echo '{ "Version": 1 }' ;;
+  "iam get-instance-profile")   # existing: holds the role of the same name; STUB_PROFILE_EMPTY=1: holds no role
+    if [[ "${STUB_MODE:-empty}" == empty ]]; then echo "An error occurred (NoSuchEntity)" >&2; exit 254; fi
+    if [[ -n "${STUB_PROFILE_EMPTY:-}" ]]; then echo None; else optval --instance-profile-name; fi ;;
+  "cloudwatch put-metric-data") ;;   # the real CLI prints nothing on success
+  "ec2 delete-security-group")   # the real CLI (2.2x+) prints this on success
+    printf '{\n    "Return": true,\n    "GroupId": "%s"\n}\n' "$(optval --group-id)" ;;
+  "s3api put-bucket-lifecycle-configuration")   # the real CLI (2.2x+) prints this on success
+    printf '{\n    "TransitionDefaultMinimumObjectSize": "all_storage_classes_128K"\n}\n' ;;
+  "ec2 run-instances")   # the --user-data file is saved to $STUB_LOG.userdata
+    v=$(optval --user-data); [[ "$v" != file://* ]] || cp "${v#file://}" "$STUB_LOG.userdata"
+    echo i-new ;;
+  *)
+    if [[ "${STUB_MODE:-empty}" == empty ]]; then
+      case "$verb" in get-role|head-bucket|describe-repositories|get-parameter|get-instance-profile) exit 254 ;; esac
+      case "$verb" in describe-vpcs) echo vpc-stub ;; *) echo None ;; esac
+    else
+      case "$verb" in
+        describe-vpcs) echo vpc-stub ;;
+        describe-instances)
+          case "$*" in
+            *HttpPutResponseHopLimit*) echo 2 ;;
+            *"Reservations[].Instances[].InstanceId"*)   # STUB_NO_INSTANCE=1: no server yet
+              if [[ -n "${STUB_NO_INSTANCE:-}" ]]; then echo None; else echo i-stub; fi ;;
+            # STUB_DOT_VOLUMES: volumes the server deletes when it is terminated (DeleteOnTermination=true)
+            *BlockDeviceMappings*) echo "${STUB_DOT_VOLUMES:-vol-root}" ;;
+            *"[InstanceType,"*) printf '%s\tap-southeast-1a\n' "${STUB_ITYPE:-t4g.medium}" ;;
+            *InstanceType*) echo "${STUB_ITYPE:-t4g.medium}" ;;   # STUB_ITYPE: the server's instance type
+            *) echo i-stub ;;
+          esac ;;
+        describe-instance-information)   # STUB_PING: "PingStatus<TAB>LastPingDateTime" (default: Online, far future)
+          # STUB_PINGS: a file of such lines, one per query in turn (count in $STUB_LOG.pingn; the last one repeats)
+          case "$*" in
+            *LastPingDateTime*)
+              if [[ -n "${STUB_PINGS:-}" ]]; then
+                n=$(( $(cat "$STUB_LOG.pingn" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STUB_LOG.pingn"
+                total=$(grep -c . "$STUB_PINGS"); if (( n > total )); then n=$total; fi
+                sed -n "${n}p" "$STUB_PINGS"
+              else
+                printf '%s\n' "${STUB_PING:-Online	2099-01-01T00:00:00.000000+00:00}"
+              fi ;;
+            *) echo Online ;;
+          esac ;;
+        describe-volumes-modifications) echo optimizing ;;
+        describe-volumes)   # STUB_NO_VOLUME=1: no data volume; STUB_MULTI=volume: two of them
+          # STUB_VOL_ATTACHED: the instance a volume is attached to (default None)
+          case "$*" in
+            *"Attachments[0].InstanceId"*) echo "${STUB_VOL_ATTACHED:-None}" ;;
+            *"Volumes[0].Size"*) echo "${STUB_VOL_SIZE:-20}" ;;
+            *"Volumes[]."*)
+              # STUB_VOL_FS: the volume's edh:fs tag (default: none); STUB_VOL_ID: its id (default vol-stub)
+              if [[ -n "${STUB_NO_VOLUME:-}" ]]; then :
+              elif [[ "${STUB_MULTI:-}" == volume ]]; then printf 'vol-stub\tap-southeast-1a\tNone\nvol-stub2\tap-southeast-1a\tNone\n'
+              else printf '%s\tap-southeast-1a\t%s\n' "${STUB_VOL_ID:-vol-stub}" "${STUB_VOL_FS:-None}"; fi ;;
+            *) echo None ;;
+          esac ;;
+        describe-addresses)   # STUB_MULTI=eip: two tagged Elastic IPs
+          case "$*" in
+            *"Addresses[]."*)
+              if [[ "${STUB_MULTI:-}" == eip ]]; then printf 'eipalloc-stub\t203.0.113.10\neipalloc-stub2\t203.0.113.11\n'
+              else printf 'eipalloc-stub\t203.0.113.10\n'; fi ;;
+            *) echo None ;;
+          esac ;;
+        describe-security-groups) echo sg-stub ;;
+        get-lifecycle-policies) echo policy-stub ;;
+        *) echo stub ;;
+      esac
+    fi ;;
+esac
+exit 0

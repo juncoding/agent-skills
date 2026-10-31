@@ -1,0 +1,8 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Sid": "AgentMetrics", "Effect": "Allow", "Action": "cloudwatch:PutMetricData", "Resource": "*",
+      "Condition": { "StringEquals": { "cloudwatch:namespace": "CWAgent/__NAME__" } } },
+    { "Sid": "AgentDescribe", "Effect": "Allow", "Action": "ec2:DescribeTags", "Resource": "*" }
+  ]
+}

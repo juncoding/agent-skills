@@ -1,0 +1,20 @@
+# ec2-dedicated-host settings for this project. Flat `key: value` only (no nesting, no lists, no `#` inside values).
+client: acme                 # lowercase letters/digits/dashes; names every AWS resource
+env: prod
+region: ap-southeast-1
+account_id: ""               # 12-digit AWS account this project deploys to; scripts refuse any other
+domain: app.example.com      # A record must point at the server's Elastic IP
+alert_emails: ops@example.com            # comma-separated; required when monitoring: cloudwatch
+monitoring: cloudwatch       # cloudwatch | none
+instance_type: auto          # auto = sized from app_memory_mb + uses_gotenberg
+data_volume_gb: 20
+app_port: 3000
+app_memory_mb: 768           # container memory limit; also drives sizing
+uses_gotenberg: false        # true adds the PDF renderer (gotenberg) service
+app_uses_instance_role: true # true = the app container may use the server's IAM role (needed for S3 uploads); false = containers cannot reach instance metadata (hop limit 1)
+backup_schedule: auto        # auto (hourly < 2 GB, else daily) | hourly | daily
+daily_backup_hour_utc: 18
+migrate_cmd: ""              # e.g. npx prisma migrate deploy  (no single quotes)
+dockerfile: Dockerfile
+build_context: .
+prod_branch: main            # env prod deploys only exactly origin/<prod_branch>

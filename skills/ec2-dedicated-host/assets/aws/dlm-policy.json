@@ -1,0 +1,11 @@
+{
+  "PolicyType": "EBS_SNAPSHOT_MANAGEMENT",
+  "ResourceTypes": ["VOLUME"],
+  "TargetTags": [ { "Key": "edh:snapshot", "Value": "__NAME__" } ],
+  "Schedules": [
+    { "Name": "daily", "CopyTags": true, "TagsToAdd": [ { "Key": "edh:schedule", "Value": "daily" } ],
+      "CreateRule": { "Interval": 24, "IntervalUnit": "HOURS", "Times": ["18:30"] }, "RetainRule": { "Count": 7 } },
+    { "Name": "weekly", "CopyTags": true, "TagsToAdd": [ { "Key": "edh:schedule", "Value": "weekly" } ],
+      "CreateRule": { "CronExpression": "cron(30 19 ? * SUN *)" }, "RetainRule": { "Count": 4 } }
+  ]
+}

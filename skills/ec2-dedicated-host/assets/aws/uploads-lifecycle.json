@@ -1,0 +1,5 @@
+{ "Rules": [
+  { "ID": "noncurrent", "Status": "Enabled", "Filter": { "Prefix": "" },
+    "Expiration": { "ExpiredObjectDeleteMarker": true },
+    "NoncurrentVersionExpiration": { "NoncurrentDays": 30 }, "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 } }
+] }

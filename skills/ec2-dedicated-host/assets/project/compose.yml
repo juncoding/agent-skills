@@ -1,0 +1,65 @@
+# ec2-dedicated-host stack — one client per server. Values come from .env (written by edh-deploy.sh).
+# Needs Docker Compose v2.30 or later: env_file `format: raw` (secrets are passed literally — no $-interpolation,
+# no quote handling).
+name: ${EDH_NAME:?}
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "${EDH_HTTP_PORT:-80}:80"
+      - "${EDH_HTTPS_PORT:-443}:443"
+      - "${EDH_HTTPS_PORT:-443}:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?}
+      MAINT_BYPASS: ${MAINT_BYPASS:?}
+      APP_PORT: ${APP_PORT:-3000}
+    volumes:
+      - ./caddy:/etc/caddy:ro                       # directory mount, so file replacement is seen
+      - ${EDH_DATA_DIR:-/data}/caddy:/data          # certificates survive rebuilds
+      - ${EDH_DATA_DIR:-/data}/maint:/srv/maint:ro
+    mem_limit: 256m
+    logging: *logging
+
+  app:
+    image: ${APP_IMAGE:?}
+    restart: unless-stopped
+    env_file:
+      - path: ./app.env
+        format: raw
+    environment:
+      PORT: ${APP_PORT:-3000}
+    depends_on:
+      postgres: { condition: service_healthy }
+    mem_limit: ${APP_MEMORY_MB:-768}m
+    logging: *logging
+
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    env_file:
+      - path: ./postgres.env
+        format: raw
+    volumes:
+      - ${EDH_DATA_DIR:-/data}/postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U app -d app"]   # TCP: not up during first-boot init
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    stop_grace_period: 60s                          # let Postgres shut down cleanly
+    shm_size: 128m
+    mem_limit: 512m
+    logging: *logging
+
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    profiles: [gotenberg]
+    restart: unless-stopped
+    mem_limit: 1g
+    logging: *logging

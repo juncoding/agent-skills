@@ -9,7 +9,8 @@ description: >-
   Postgres/Mongo/Redis backups (pg_dump, offsite to S3, restore drills) on that host. Also for standing
   up a fresh EC2 Docker host from scratch. Covers casual phrasings like "deploy to my server", "put this
   on my EC2", "set up my VPS", "add this app to my box". NOT for managed AWS (ECS, Fargate, EKS,
-  Kubernetes), local-only dev, writing a Dockerfile by itself, or cloud cost/billing questions.
+  Kubernetes), local-only dev, writing a Dockerfile by itself, or cloud cost/billing questions. NOT for
+  one-client-per-server setups with deploy/deploy.yml (use ec2-dedicated-host).
 ---
 
 # EC2 as a single-host Docker platform
