@@ -88,6 +88,14 @@ region and bucket from `AWS_REGION` and `EDH_UPLOADS_BUCKET` (see 4). With `fals
 the role. Gotenberg (if `uses_gotenberg: true`) is at `GOTENBERG_URL` (`http://gotenberg:3000`) inside the
 Compose network.
 
+**`issued/` is write-once.** Objects under the `issued/` prefix of the uploads bucket (documents the app has
+issued and must keep exactly as sent) can't be deleted or overwritten by the server's role: an explicit Deny
+refuses `DeleteObject` / `DeleteObjectVersion` there, and refuses `PutObject` unless the request carries
+`If-None-Match: *` (create-only; S3 answers 412 if the key exists). Write `issued/` keys with a single
+`PutObject` + `IfNoneMatch: "*"`. Multipart uploads and `CopyObject` into `issued/` are refused
+(`CreateMultipartUpload` / `UploadPart` / `CopyObject` can't carry the header). Everything outside `issued/`
+is unchanged: get/put/delete as before.
+
 Bind-mounted directories are not a place for user files: on the server every `/data/<dir>` bind source must
 be a root-owned real directory (checked at each deploy, see 8), and they are not backed up by the database
 dumps. Write user files to the S3 uploads bucket.

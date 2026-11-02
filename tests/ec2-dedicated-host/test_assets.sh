@@ -109,12 +109,26 @@ bad = [s["Sid"] for s in st if any("Delete" in a or a in ("s3:*", "*") for a in 
 m = [s for s in st if "cloudwatch:PutMetricData" in lst(s["Action"])]
 w = [s for s in st if "s3:PutObject" in lst(s["Action"]) and any("backups" in r for r in lst(s["Resource"]))]
 s3 = [s["Sid"] + "=" + s.get("Condition", {}).get("StringEquals", {}).get("s3:ResourceAccount", "-")
-      for s in st if any(a.startswith("s3:") for a in lst(s["Action"]))]
+      for s in st if s["Effect"] == "Allow" and any(a.startswith("s3:") for a in lst(s["Action"]))]
 print("delete:" + ",".join(bad) + " ns:" + ",".join(s["Condition"]["StringEquals"]["cloudwatch:namespace"] for s in m)
       + " put:" + ",".join(s["Sid"] + "=" + s.get("Condition", {}).get("StringEquals", {}).get("s3:if-none-match", "-") for s in w)
       + " owner:" + ",".join(s3))' 2>&1)
 assert_eq "$chk" "delete: ns:EDH/acme-prod put:BackupsWrite=* owner:BackupsWrite=123456789012,BackupsRead=123456789012,AppUploads=123456789012" \
   "policy: no delete on backups; backup writes create-only; S3 only in own-account buckets; metrics only in EDH/<name>"
+# uploads issued/ prefix: undeletable and write-once (explicit Denies override AppUploads' allow)
+issued=$(printf '%s' "$pol" | python3 -I -c 'import json, sys
+st = {s.get("Sid"): s for s in json.load(sys.stdin)["Statement"]}
+lst = lambda v: v if isinstance(v, list) else [v]
+out = []
+for sid in ("UploadsIssuedNoDelete", "UploadsIssuedWriteOnce"):
+    s = st.get(sid)
+    if not s: out.append(sid + "=missing"); continue
+    out.append("%s=%s %s %s %s" % (sid, s["Effect"], ",".join(sorted(lst(s["Action"]))), "|".join(lst(s["Resource"])),
+                                   json.dumps(s.get("Condition", {}), sort_keys=True)))
+print("\n".join(out))' 2>&1)
+assert_eq "$issued" 'UploadsIssuedNoDelete=Deny s3:DeleteObject,s3:DeleteObjectVersion arn:aws:s3:::edh-acme-prod-uploads-123456789012/issued/* {}
+UploadsIssuedWriteOnce=Deny s3:PutObject arn:aws:s3:::edh-acme-prod-uploads-123456789012/issued/* {"Null": {"s3:if-none-match": "true"}}' \
+  "policy: uploads issued/ can't be deleted and is written only with If-None-Match (write-once)"
 # C1: AmazonSSMManagedInstanceCore allows ssm:GetParameter* on *: an explicit Deny keeps other clients' parameters out
 deny=$(printf '%s' "$pol" | python3 -I -c 'import json, sys
 st = [s for s in json.load(sys.stdin)["Statement"] if s.get("Sid") == "NoOtherParameters"]
