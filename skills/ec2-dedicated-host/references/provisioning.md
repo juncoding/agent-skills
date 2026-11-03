@@ -40,7 +40,7 @@ If the configured `instance_type` differs from the running server's, provision o
 | IAM role + instance profile | `edh-acme-prod-host` | `AmazonSSMManagedInstanceCore` + inline `edh-host` (and `edh-cwagent` with monitoring) |
 | Security group | `edh-acme-prod` | TCP 80/443 (IPv4+IPv6), UDP 443 (IPv4, HTTP/3). **No port 22.** |
 | Backup bucket | `edh-acme-prod-backups-123456789012` | versioned, public access blocked, lifecycle (see backup-restore.md), `Protect=true` |
-| Uploads bucket | `edh-acme-prod-uploads-123456789012` | versioned, public access blocked, noncurrent versions kept 30 days, `Protect=true` |
+| Uploads bucket | `edh-acme-prod-uploads-123456789012` | versioned, public access blocked, noncurrent versions kept 30 days, `Protect=true`; `issued/` write-once and undeletable (IAM, below) |
 | ECR repository | `edh/acme` | scan on push, keeps the last 20 images; shared by all envs of client `acme` |
 | Internal secrets | `/acme/prod/_edh/postgres-password`, `/acme/prod/_edh/maint-bypass` | 40 hex chars, SecureString, never overwritten |
 | Data volume | `edh-acme-prod-data` | gp3, encrypted, `data_volume_gb` (default 20), `edh:role=data`, `edh:snapshot=acme-prod`, `Protect=true` |
@@ -76,7 +76,10 @@ backup-restore.md). Changing the value and re-running `provision.sh --apply` upd
   (except AWS public `/aws/service/*`), so the managed SSM policy can't widen it. Decrypt only via SSM.
 - **Backups**: `s3:PutObject` only under `db/*`, only with `If-None-Match: *` (create-only, **write-once**)
   and only in this account (`s3:ResourceAccount`); read (by version) of the backup bucket's objects, no listing; **no delete**.
-- **Uploads**: get/put/delete/list on the uploads bucket only.
+- **Uploads**: get/put/delete/list on the uploads bucket only (in this account). Under `issued/`, explicit
+  **Denies** override that: no `DeleteObject` / `DeleteObjectVersion`, and `PutObject` only with
+  `If-None-Match: *` (**write-once**). So the uploads lifecycle (noncurrent 30 days, expired delete markers)
+  can never remove an issued object: it never gets a noncurrent version or a delete marker.
 - **ECR**: pull from `edh/<client>` only.
 - **CloudWatch**: `PutMetricData` only into namespace `EDH/<client>-<env>` (the backup heartbeat); the agent
   (monitoring module) only into `CWAgent/<client>-<env>`. One client's server can't fake another's metrics.
