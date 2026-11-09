@@ -14,7 +14,8 @@ release_flow: tags
 
 1. Merge to `main` through review as usual.
 2. Tag a commit on main and push the tag: `git tag -a v1.2.3 -m "release: …" && git push origin v1.2.3`.
-3. `release.sh v1.2.3` (add `--maint` for a risky migration).
+3. `release.sh v1.2.3` (add `--maint` for a risky migration, and `--no-rollback` when the previous version
+   can't run on the migrated schema: SKILL.md § Routine "deploy to prod", `--no-rollback`).
 
 `release.sh`:
 
@@ -52,7 +53,9 @@ A rollback restores the previous app.env too, so `APP_VERSION` goes back with th
 ## Going back, hotfixes
 
 - **Back to the previous version:** `rollback.sh` (previous image + env; the branch stays where it is, so
-  the next `deploy.sh` brings the release back).
+  the next `deploy.sh` brings the release back). After a `--no-rollback` release changed the schema it
+  refuses the older images (the rollback guard): fix forward, or restore the safety dump first and then
+  `rollback.sh --allow-incompatible`, on the user's word.
 - **A fix:** merge it into main, tag `v1.2.4`, `release.sh v1.2.4`.
 - **Emergency** (main is broken): `deploy.sh --allow-non-main` still builds the working copy, with the red
   warning and a confirmation, exactly as in the default flow.

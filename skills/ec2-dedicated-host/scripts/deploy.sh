@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# deploy.sh [--maint] [--allow-dirty] [--allow-non-main]
+# deploy.sh [--maint] [--no-rollback] [--allow-dirty] [--allow-non-main]
 # Build the current commit for arm64, push to ECR, ship deploy/ + host scripts, roll out via SSM.
 #   --maint           show the maintenance page during migrations (use for risky migrations)
+#   --no-rollback     for migrations the previous version can't run on: once they have changed the schema,
+#                     a failure never starts the previous image again — maintenance stays ON (exit 4 on the
+#                     server), the replaced image goes into the rollback guard; a migration that fails without
+#                     changing the schema keeps maintenance ON too (exit 5)
 #   --allow-dirty     deploy uncommitted changes (tag gets -dirty<timestamp>); for env prod only together with
 #                     --allow-non-main
 #   --allow-non-main  env prod only: deploy although HEAD is not exactly origin/<prod_branch> or the tree is dirty
@@ -16,9 +20,9 @@
 # previous version is still serving); an unexpected AWS CLI error exits with the CLI's own code.
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$(dirname "$0")/lib.sh"
-MAINT=""; DIRTY_OK=0; NON_MAIN_OK=0
+MAINT=""; NO_ROLLBACK=""; DIRTY_OK=0; NON_MAIN_OK=0
 for a in "$@"; do
-  case "$a" in --maint) MAINT=--maint ;; --allow-dirty) DIRTY_OK=1 ;; --allow-non-main) NON_MAIN_OK=1 ;; *) die "unknown option: $a" ;; esac
+  case "$a" in --maint) MAINT=--maint ;; --no-rollback) NO_ROLLBACK=--no-rollback ;; --allow-dirty) DIRTY_OK=1 ;; --allow-non-main) NON_MAIN_OK=1 ;; *) die "unknown option: $a" ;; esac
 done
 load_config
 oplog_begin deploy
@@ -233,11 +237,13 @@ t=\$(mktemp)
 aws s3api get-object --bucket $BUCKET --key _edh/bundles/$SHA.tgz --expected-bucket-owner $ACCT --region $EDH_REGION \"\$t\" >/dev/null
 tar xzf \"\$t\" --no-same-owner -C \"\$R\"; rm -f \"\$t\"
 ls -1dt /opt/edh/releases/* | tail -n +6 | xargs -r rm -rf
-bash \"\$R/host/edh-deploy.sh\" \"\$R\" $IMAGE $MAINT" || rc=$?
+bash \"\$R/host/edh-deploy.sh\" \"\$R\" $IMAGE $MAINT $NO_ROLLBACK" || rc=$?
 case $rc in
   0) ;;
   1) die "deploy stopped before the swap — the previous version is still serving, with its previous configuration (on a first deploy: nothing was serving yet). See the output above." ;;
   2) OPLOG_RESULT="rolled back"; die "new version failed its health check — rolled back to the previous version" ;;
+  4) OPLOG_RESULT="held, maintenance on"; die "the deploy failed after its migrations changed the database schema (or with no image to roll back to that runs on it) — maintenance is ON and NO previous version was started again (see the recovery steps above). Fix forward with a new release (--no-rollback again); going back needs a database restore first (restore.sh db, ask the user), then rollback.sh --allow-incompatible. Switch maintenance off only once a version passes /health." ;;
+  5) OPLOG_RESULT="migrations failed, maintenance on"; die "migrations failed and the database schema is unchanged; the previous version is still running behind the maintenance page (--no-rollback). Before maint.sh off: clear any failed-migration record (Prisma: migrate resolve --rolled-back <migration>) and check the app restarts — see the output above." ;;
   3) die "deploy failed and no healthy version is running — the site may be down; run status.sh" ;;
   124) OPLOG_RESULT="timed out (still running)"; die "the deploy is still running on the server after the timeout — run status.sh to see how it ended" ;;
   *) die "deploy failed (exit $rc) — the site may be down; run status.sh" ;;

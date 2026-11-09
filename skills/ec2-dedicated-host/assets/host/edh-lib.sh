@@ -83,6 +83,44 @@ sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
 
+# The rollback guard: app images that can't run on the database's current schema, one line each,
+# "<image>\t<UTC time>\t<the image whose migrations changed the schema>". A `--no-rollback` deploy whose
+# migrations change the schema adds every image the server ran before it. No deploy, automatic rollback or edh-rollback.sh
+# switches to a listed image; only `edh-rollback.sh --allow-incompatible` (after the database was restored to
+# a schema that image runs on) removes its line. It lives in /data beside the database it describes, so a
+# later deploy, a new release dir or an OS upgrade doesn't forget it; no container mounts /data itself.
+EDH_GUARD_FILE="${EDH_GUARD_FILE:-$EDH_DATA_DIR/incompatible_images}"
+image_blocked() { [[ -n "${1:-}" && -f "$EDH_GUARD_FILE" ]] && cut -f1 "$EDH_GUARD_FILE" | grep -qxF -- "$1"; }
+# block_image <image> <by-image> — add <image> to the guard (once)
+block_image() {
+  if image_blocked "$1"; then return 0; fi
+  printf '%s\t%s\t%s\n' "$1" "$(date -u +%FT%TZ)" "$2" >> "$EDH_GUARD_FILE"
+}
+# unblock_image <image> — remove <image>'s line (edh-rollback.sh --allow-incompatible only)
+unblock_image() {
+  local t
+  [[ -f "$EDH_GUARD_FILE" ]] || return 0
+  t=$(mktemp) || return 1
+  awk -F'\t' -v i="$1" '$1 != i' "$EDH_GUARD_FILE" > "$t" && cat "$t" > "$EDH_GUARD_FILE"
+  rm -f "$t"
+}
+
+# schema_fingerprint — sha256 of the app database's schema: pg_dump --schema-only without comments and without
+# the \restrict / \unrestrict lines (PostgreSQL 17.6+ writes a random key there). Table data — a migration
+# tool's history rows included — is not part of it, so a migration that failed and rolled back leaves it as it
+# was. Non-zero (and prints nothing) if the schema can't be read.
+schema_fingerprint() {
+  local f
+  f=$(mktemp) || return 1
+  if ! dc exec -T postgres pg_dump -U app -d app --schema-only --no-owner --no-privileges > "$f" 2>/dev/null \
+     || [[ ! -s "$f" ]]; then
+    rm -f "$f"; return 1
+  fi
+  grep -v -E '^(--|\\restrict |\\unrestrict )' "$f" > "$f.schema" || true
+  sha256_of "$f.schema"
+  rm -f "$f" "$f.schema"
+}
+
 # app_env_defaults — app.env lines so far on stdin; prints the defaults the app gets for names it hasn't set
 # itself through SSM (a secret of the same name always wins): AWS_REGION, EDH_UPLOADS_BUCKET (this client's
 # uploads bucket; left out without a valid account id), with Gotenberg GOTENBERG_URL and, for a release

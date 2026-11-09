@@ -13,6 +13,32 @@ Manager shell (`aws ssm start-session --target <instance-id>`; no SSH). Never pr
   schema, fix forward, or restore the pre-deploy dump (`db/safety/…`): `restore.sh db --key … --check`, then
   without `--check` after consent. A failed deploy that left maintenance on: `maint.sh off` once healthy.
 
+## Held after a schema change (`--no-rollback`, exit 4)
+
+- **Symptom:** deploy says `failed after its migrations changed the database schema … maintenance is ON`;
+  a "deploy failed after migrations" (or "migrations failed, schema changed" / "no compatible rollback") email.
+- **State:** maintenance ON; the failed version left as it is (or not started); any container of an older
+  image stopped; every older image listed in `/data/incompatible_images` (`status.sh` shows it). Users see
+  the maintenance page; nothing is serving on a schema it can't run on.
+- **First:** `status.sh`, `cd /opt/edh/app && sudo docker compose logs --tail 200 app`, and the deploy output.
+- **Fix forward (preferred):** fix, merge, tag, `release.sh vX.Y.Z --maint --no-rollback`. It switches
+  maintenance off once healthy.
+- **Going back (only on the user's explicit word — it replaces live data):** `restore.sh db --key
+  db/safety/<the deploy's dump> --check`, then without `--check`; then `rollback.sh --allow-incompatible`
+  (switches to the previous image and removes its guard line); `maint.sh off` once `/health` passes. If the
+  image to go back to is the one the stopped container ran, `docker compose start app` after the restore, and
+  remove its line from `/data/incompatible_images` by hand (sudo) once it runs.
+
+## Migrations failed, schema unchanged (`--no-rollback`, exit 5)
+
+- **State:** the previous version still runs with its previous configuration, behind the maintenance page.
+- **Why maintenance stays on:** the migration tool may have recorded the failure (Prisma: a failed
+  `_prisma_migrations` row, `P3009`). An app that migrates at start-up then refuses to boot on its next
+  restart (a crash, an OOM kill, a reboot), so don't assume it is restart-safe.
+- **Fix:** read the migration error; fix the data or the migration; clear the record (Prisma: `docker compose
+  exec -T app <prisma> migrate resolve --rolled-back <migration>`); `docker compose restart app` and check
+  `/health`; then `maint.sh off`, and release again.
+
 ## Server unreachable
 
 - **Symptom:** site down and `status.sh` can't reach the server over SSM; `status-check` alarm.
