@@ -116,7 +116,8 @@ on_exit() {
         *) state="unexpected database state ($dbs) — check before using the app" ;;
       esac
       dc start app >/dev/null 2>&1 || true
-      if wait_health; then "$EDH_BIN_DIR/edh-maint.sh" off >/dev/null || true; health="the app is healthy"; else health="the app fails /health; maintenance left ON"; fi
+      if (( ${held:-0} )); then : > "$EDH_APP_DIR/maint_held"; health="maintenance left ON (a held deploy left it on: finish the recovery first)"
+      elif wait_health; then "$EDH_BIN_DIR/edh-maint.sh" off >/dev/null || true; health="the app is healthy"; else health="the app fails /health; maintenance left ON"; fi
       alert "restore failed" "Restoring $key failed: $state; $health. Safety dump: ${safety:-none taken}." ;;
     swapped)
       alert "restore: app unhealthy" "Restored $key but the app fails /health. Maintenance page left ON. The previous data is in database app_pre_restore; safety dump: ${safety:-none}." ;;
@@ -137,6 +138,10 @@ if [[ "$(pg "select count(*) from pg_database where datname = 'app_pre_restore'"
   pg 'drop database app_pre_restore with (force)' postgres >/dev/null
 fi
 
+# after a held --no-rollback deploy (edh-deploy.sh keep_maint_on) the app container is the held new version,
+# which may not run on the restored schema: the restore is one step of that recovery, so maintenance stays on.
+# Read before `maint on` below, which clears the mark.
+held=0; if [[ -f "$EDH_APP_DIR/maint_held" ]]; then held=1; fi
 stage=maint
 "$EDH_BIN_DIR/edh-maint.sh" on --message "We're restoring data from a backup." --until "in a few minutes" >/dev/null
 safety=$("$EDH_BIN_DIR/edh-backup.sh" --tag safety --force)
@@ -146,6 +151,14 @@ pg "select pg_terminate_backend(pid) from pg_stat_activity where datname in ('ap
 pg 'alter database app rename to app_pre_restore; alter database app_restore_new rename to app' postgres >/dev/null
 stage=swapped
 dc start app
+if (( held )); then
+  stage=finished
+  : > "$EDH_APP_DIR/maint_held"   # still held: maintenance stays on until the recovery is finished
+  if wait_health; then hs="passes /health"; else hs="fails /health (expected if it needs the newer schema)"; fi
+  rm -f "$f"
+  log "restore of $key complete (safety dump: $safety). A held deploy left maintenance ON, and it stays on: the app container (the held new version) $hs. Next: rollback.sh --allow-incompatible to the version this data belongs to, then maint.sh off once /health passes. The previous data is in database app_pre_restore."
+  exit 0
+fi
 wait_health || die "app unhealthy after restore — maintenance left ON"
 "$EDH_BIN_DIR/edh-maint.sh" off >/dev/null
 stage=finished

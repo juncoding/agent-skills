@@ -159,7 +159,7 @@ assert_contains "$out" 'variable ${APP_SUBDIR}' "compose: the variable is named"
 cp "$T/compose.save" deploy/compose.yml
 compose_refused 'variable ${HOME}' "$P" "$I" "    volumes:" '      - /data/uploads${HOME:-/..}:/x'
 # next to compose.yml only subdirectories, never the skill's own files
-for m in ./app.env ./postgres.env ./.env ./compose.yml ./app.env.rollback ./compose.yml.prev ./previous_image ./maint-templates \
+for m in ./app.env ./postgres.env ./.env ./compose.yml ./app.env.rollback ./compose.yml.prev ./previous_image ./maint_held ./maint-templates \
          ./x.env/sub; do
   compose_refused "reserved for the skill" "$P" "$I" "    volumes:" "      - $m:/x"
 done

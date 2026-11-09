@@ -125,7 +125,7 @@ The scaffolded `compose.yml` is the template to keep. You may add services, envi
   `/data/<dir>` (`${EDH_DATA_DIR:-/data}/<dir>`). Nested paths (`./a/b`, `/data/uploads/x`) are refused: a
   container with a read-write mount could plant a symlink that a nested path would then pass through.
 - **Next to `compose.yml`:** directories only, never a top-level file and never the skill's own entries:
-  `compose.yml`, `.env`, `*.env`, `*.prev`, `*.rollback`, `previous_image`, `maint-templates`.
+  `compose.yml`, `.env`, `*.env`, `*.prev`, `*.rollback`, `previous_image`, `maint-templates`, `maint_held`.
 - **Under `/data`:** never `/data` itself and never `/data/backups` — it holds the backup manifest, which
   restores trust because the app can't reach it. `/data/caddy` and `/data/maint` are only for `caddy`,
   `/data/postgres` only for `postgres`.

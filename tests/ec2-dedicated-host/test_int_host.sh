@@ -520,6 +520,18 @@ assert_contains "$out" "app_pre_restore" "replace: tells where the previous data
 assert_contains "$(cat "$STUB_LOG")" "--key db/safety/" "replace: safety dump uploaded first"
 assert_eq "$(bash "$EDH_BIN_DIR/edh-maint.sh" status)" "off" "replace: maintenance off afterwards"
 assert_eq "$(site)" "fixture-ok" "replace: app serving afterwards"
+# a restore during the recovery from a held --no-rollback deploy leaves maintenance on (and the hold marked)
+pgq 'drop database app_pre_restore' postgres >/dev/null
+bash "$EDH_BIN_DIR/edh-maint.sh" on >/dev/null; : > "$T/app/maint_held"
+step
+out=$(bash "$EDH_BIN_DIR/edh-restore.sh" replace "db/daily/$name" --yes 2>&1); rc=$?
+assert_status "$rc" 0 "replace after a hold: succeeds"
+assert_eq "$(bash "$EDH_BIN_DIR/edh-maint.sh" status)" "on" "replace after a hold: maintenance stays ON"
+assert_contains "$out" "rollback.sh --allow-incompatible" "replace after a hold: names the next recovery step"
+assert_eq "$([[ -f "$T/app/maint_held" ]] && echo marked)" "marked" "replace after a hold: still marked as held"
+bash "$EDH_BIN_DIR/edh-maint.sh" off >/dev/null
+assert_eq "$([[ -f "$T/app/maint_held" ]] && echo marked || echo cleared)" "cleared" "maint.sh off by hand clears the hold mark"
+pgq 'drop database app_pre_restore' postgres >/dev/null
 
 # ============ --no-rollback against a real postgres: the schema is read with pg_dump (PostgreSQL 18 writes a
 # random \restrict key, which must not count as a change); a migration that changes it is a docker shim that

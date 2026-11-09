@@ -257,7 +257,8 @@ assert_contains " $(guard) " " img:v12 " "SIGTERM, schema changed: img:v12 in th
 assert_eq "$(maint)" "on" "SIGTERM, schema changed: maintenance on"
 assert_status "$(deploy "$T/plain" img:k2 --no-rollback)" 0 "(fix forward with img:k2)"
 # … and one that changed nothing: the previous version keeps running, maintenance stays on (like exit 5)
-assert_status "$(deploy "$T/killnoop" img:k3 --maint --no-rollback)" 1 "SIGTERM during a migration that changed nothing: aborted (exit 1)"
+assert_status "$(deploy "$T/killnoop" img:k3 --maint --no-rollback)" 5 "SIGTERM during a migration that changed nothing: exit 5 (maintenance on)"
+assert_contains "$(alert_text)" "maintenance on" "SIGTERM, schema unchanged: the alert says maintenance is on"
 assert_eq "$(running)" "img:k2" "SIGTERM, schema unchanged: img:k2 still running"
 assert_eq "$(maint)" "on" "SIGTERM, schema unchanged: maintenance stays on (restart-safety unknown)"
 assert_not_contains " $(guard) " " img:k2 " "SIGTERM, schema unchanged: nothing added to the guard"

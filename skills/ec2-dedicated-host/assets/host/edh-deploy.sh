@@ -54,6 +54,7 @@ done_exit() { EXPECTED=1; exit "$1"; }
 # on until a deploy passes /health), no container of an older image left to start, the failed state kept for
 # whoever recovers it, a deploys.log line, an alert, exit 4. Never restores the previous configuration.
 hold() {
+  trap '' TERM INT HUP   # finish the hold even if signalled again
   retire_old_app
   keep_maint_on
   printf '%s\t%s\t%s\theld: %s\n' "$(date -u +%FT%TZ)" "$IMAGE" "${PREV:--}" "$1" >> "$EDH_DATA_DIR/deploys.log" 2>/dev/null \
@@ -86,6 +87,7 @@ retire_old_app() {
   [[ "$img" != "$IMAGE" ]] || return 0
   f="$EDH_DATA_DIR/held-app-$(date -u +%Y%m%dT%H%M%SZ).log"
   dc logs --no-color --tail 2000 app > "$f" 2>&1 || true
+  ls -1t "$EDH_DATA_DIR"/held-app-*.log 2>/dev/null | tail -n +11 | xargs -r rm -f || true   # keep the 10 newest
   if dc rm -s -f app >/dev/null 2>&1; then
     log "removed the app container of ${img:-an unknown image}: it may not run on this schema (its last log lines: $f)"
   else
@@ -98,7 +100,7 @@ retire_old_app() {
 }
 # recovery_steps — the way out of exit 4, for the alert and the log
 recovery_steps() {
-  printf '%s' "Maintenance is ON and stays on until a deploy passes /health. Recover by fixing forward: deploy a corrected release (with --no-rollback again). If a migration failed, its tool may have recorded the failure (Prisma: a failed _prisma_migrations row, P3009) and refuse to migrate again until it is cleared (Prisma: migrate resolve, after checking what the migration left). Going back instead means restoring the database to a schema the old version runs on (restore.sh db from this deploy's safety dump: a destructive step that needs explicit authorization), then rollback.sh --allow-incompatible. The images that can't run on this schema are listed in $EDH_GUARD_FILE."
+  printf '%s' "Maintenance is ON and stays on until a deploy passes /health. Recover by fixing forward: deploy a corrected release (with --no-rollback again). If a migration failed, its tool may have recorded the failure (Prisma: a failed _prisma_migrations row, P3009) and refuse to migrate again until it is cleared (Prisma: migrate resolve, after checking what the migration left). Going back instead means restoring the database to a schema the old version runs on (restore.sh db from this deploy's safety dump: a destructive step that needs explicit authorization), then rollback.sh --allow-incompatible. The restore starts the app container of the held new version on the restored schema, which may fail /health; maintenance stays on through it, and rollback.sh --allow-incompatible is the next step either way. The images that can't run on this schema are listed in $EDH_GUARD_FILE."
 }
 # block_prev — after the migrations changed the schema, record every image this server ran before (the one
 # being replaced, edh-rollback.sh's previous image, every image in deploys.log) as unable to run on it: each of
@@ -172,6 +174,7 @@ abort_first_deploy() {
 on_exit() {
   local rc=$? line="${EDH_DIE_LINE:-$1}"
   trap - EXIT
+  trap '' TERM INT HUP   # a second signal (SSM repeats them) must not cut the clean-up short
   if [[ -n "$STAGE" ]]; then rm -rf "$STAGE"; fi
   if (( EXPECTED || rc == 0 )); then exit "$rc"; fi
   if (( DEPLOYED )); then
@@ -218,6 +221,10 @@ on_exit() {
     exit 3
   fi
   finish_maint || true
+  if (( KEEP_MAINT )); then
+    alert "deploy aborted, maintenance on" "Deploying $IMAGE stopped at line $line (exit $rc) during its migrations; the database schema is unchanged and the previous version is still running, behind the maintenance page (--no-rollback). Don't assume it can restart: if the migration tool recorded the interrupted migration (Prisma: P3009), clear the record and check docker compose restart app before maint.sh off."
+    exit 5
+  fi
   alert "deploy aborted at line $line" "Deploying $IMAGE failed before the switch (exit $rc); the previous version is still running. See the deploy output."
   exit 1
 }
