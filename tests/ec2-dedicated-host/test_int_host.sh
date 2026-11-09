@@ -11,7 +11,8 @@ export EDH_HTTP_PORT=18081 EDH_HTTPS_PORT=18443
 REAL_DOCKER=$(command -v docker)
 cleanup() {
   docker compose -p $P down -v >/dev/null 2>&1
-  docker image rm edh-fixture:good2 edh-fixture:bad2 edh-fixture:broken edh-test-caddy:pinned >/dev/null 2>&1
+  docker image rm edh-fixture:good2 edh-fixture:bad2 edh-fixture:good3 edh-fixture:bad3 edh-fixture:good4 edh-fixture:broken edh-test-caddy:pinned \
+    >/dev/null 2>&1
   rm -rf "$T"
 }
 trap cleanup EXIT
@@ -25,7 +26,7 @@ alerted() { if grep -qF -- "--subject [$P] $1" "$STUB_LOG"; then echo yes; else 
 metric_sent() { if grep -qF -- "--metric-name $1 " "$STUB_LOG"; then echo yes; else echo no; fi; }
 mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }   # GNU first: GNU `stat -f` means file-system status
 mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
-deploy() { bash "$1/host/edh-deploy.sh" "$1" "$2" ${3:+"$3"} >"$T/out" 2>&1; echo $?; }
+deploy() { bash "$1/host/edh-deploy.sh" "$@" >"$T/out" 2>&1; echo $?; }
 img() { sed -n 's/^APP_IMAGE=//p' "$T/app/.env"; }
 site() { curl -s localhost:18081/; }
 # in subshells: edh-lib.sh sets -Eeuo pipefail
@@ -86,6 +87,8 @@ out=$(docker build -q -t edh-fixture:bad  --build-arg HEALTHY=0 "$TESTS_DIR/fixt
 out=$(printf 'FROM busybox:1.36\nCMD ["/nonexistent-binary"]\n' | docker build -q -t edh-fixture:broken - 2>&1) \
   || bail "docker build failed" "$out"
 docker tag edh-fixture:good edh-fixture:good2; docker tag edh-fixture:bad edh-fixture:bad2
+docker tag edh-fixture:good edh-fixture:good3; docker tag edh-fixture:bad edh-fixture:bad3
+docker tag edh-fixture:good edh-fixture:good4
 
 # shims (each used only where a test puts its dir first on PATH)
 mkdir -p "$T/flockbin" "$T/mvbin" "$T/imgbin"
@@ -517,6 +520,61 @@ assert_contains "$out" "app_pre_restore" "replace: tells where the previous data
 assert_contains "$(cat "$STUB_LOG")" "--key db/safety/" "replace: safety dump uploaded first"
 assert_eq "$(bash "$EDH_BIN_DIR/edh-maint.sh" status)" "off" "replace: maintenance off afterwards"
 assert_eq "$(site)" "fixture-ok" "replace: app serving afterwards"
+# a restore during the recovery from a held --no-rollback deploy leaves maintenance on (and the hold marked)
+pgq 'drop database app_pre_restore' postgres >/dev/null
+bash "$EDH_BIN_DIR/edh-maint.sh" on >/dev/null; : > "$T/app/maint_held"
+step
+out=$(bash "$EDH_BIN_DIR/edh-restore.sh" replace "db/daily/$name" --yes 2>&1); rc=$?
+assert_status "$rc" 0 "replace after a hold: succeeds"
+assert_eq "$(bash "$EDH_BIN_DIR/edh-maint.sh" status)" "on" "replace after a hold: maintenance stays ON"
+assert_contains "$out" "rollback.sh --allow-incompatible" "replace after a hold: names the next recovery step"
+assert_eq "$([[ -f "$T/app/maint_held" ]] && echo marked)" "marked" "replace after a hold: still marked as held"
+bash "$EDH_BIN_DIR/edh-maint.sh" off >/dev/null
+assert_eq "$([[ -f "$T/app/maint_held" ]] && echo marked || echo cleared)" "cleared" "maint.sh off by hand clears the hold mark"
+pgq 'drop database app_pre_restore' postgres >/dev/null
+
+# ============ --no-rollback against a real postgres: the schema is read with pg_dump (PostgreSQL 18 writes a
+# random \restrict key, which must not count as a change); a migration that changes it is a docker shim that
+# runs real DDL (the fixture image has no psql)
+mkdir -p "$T/migbin"
+cat > "$T/migbin/docker" <<EOS
+#!/bin/bash
+if [[ "\$*" == *" run --rm --no-deps"* && "\$*" == *PGADVANCE* ]]; then
+  "$REAL_DOCKER" compose -p $P exec -T postgres psql -q -U app -d app -c "create table adv_\$RANDOM\$RANDOM (id int)" >/dev/null || exit 9
+  exit 0
+fi
+exec "$REAL_DOCKER" "\$@"
+EOS
+chmod +x "$T/migbin/docker"
+make_release "$T/r9" "echo PGADVANCE"
+step
+assert_status "$(deploy "$T/r1" edh-fixture:good3 --no-rollback)" 0 "--no-rollback, real schema unchanged: deployed"
+assert_contains "$(cat "$T/out")" "left the database schema unchanged" "--no-rollback: pg_dump's random \\restrict line is not a change"
+assert_eq "$([[ -s "$T/data/incompatible_images" ]] && echo listed || echo empty)" "empty" "--no-rollback, unchanged: guard empty"
+before_img=$(img)
+step
+assert_status "$(PATH="$T/migbin:$PATH" deploy "$T/r9" edh-fixture:bad3 --maint --no-rollback)" 4 \
+  "--no-rollback, real schema changed, unhealthy: held (exit 4)"
+assert_eq "$(img)" "edh-fixture:bad3" "held: .env still names the failed image"
+assert_eq "$(docker inspect -f '{{.Config.Image}}' "$(dcx ps -q app)" 2>/dev/null)" "edh-fixture:bad3" \
+  "held: the app container runs the failed image, not $before_img"
+assert_eq "$(bash "$EDH_BIN_DIR/edh-maint.sh" status)" "on" "held: maintenance ON"
+assert_eq "$(curl -s -o /dev/null -w '%{http_code}' localhost:18081/)" "503" "held: users see the maintenance page"
+assert_contains "$(cut -f1 "$T/data/incompatible_images")" "$before_img" "held: $before_img in the rollback guard"
+assert_eq "$(alerted "deploy failed after migrations")" "yes" "held: alert sent"
+assert_eq "$(alerted "deploy rolled back")" "no" "held: no rollback"
+assert_eq "$(pgq "select count(*) from pg_tables where tablename like 'adv\_%'")" "1" "held: the migration's table is there"
+assert_status "$(bash "$EDH_BIN_DIR/edh-rollback.sh" >"$T/out" 2>&1; echo $?)" 4 "held: edh-rollback.sh refuses (exit 4)"
+assert_eq "$(img)" "edh-fixture:bad3" "held: refused rollback changes nothing"
+step
+assert_status "$(deploy "$T/r1" edh-fixture:good2 --maint --no-rollback)" 1 "after the hold, an image that ran before (good2) is refused"
+assert_eq "$(img)" "edh-fixture:bad3" "refused: nothing changed"
+assert_status "$(deploy "$T/r1" edh-fixture:good4 --no-rollback)" 0 "fix forward after the hold (a new image, no --maint): deployed"
+assert_eq "$(site)" "fixture-ok" "fix forward: site serves"
+assert_eq "$(bash "$EDH_BIN_DIR/edh-maint.sh" status)" "off" "fix forward: the held maintenance switched off"
+assert_status "$(deploy "$T/r1" "$before_img")" 1 "the image left behind can't be deployed again"
+assert_eq "$(site)" "fixture-ok" "refused deploy: site still serves"
+rm -f "$T/data/incompatible_images"   # the checks below run without a guard
 
 # ============ maintenance
 bash "$EDH_BIN_DIR/edh-maint.sh" on --message "Testing" >/dev/null

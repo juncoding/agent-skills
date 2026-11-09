@@ -26,7 +26,7 @@ import sys
 ALLOWED_VARS = {"EDH_NAME", "APP_IMAGE", "APP_PORT", "APP_MEMORY_MB", "DOMAIN", "MAINT_BYPASS",
                 "COMPOSE_PROFILES", "EDH_DATA_DIR", "EDH_HTTP_PORT", "EDH_HTTPS_PORT"}
 # files and directories the skill keeps next to compose.yml on the server (/opt/edh/app)
-RESERVED_NAMES = {"compose.yml", ".env", "previous_image", "maint-templates"}
+RESERVED_NAMES = {"compose.yml", ".env", "previous_image", "maint-templates", "maint_held"}
 RESERVED_SUFFIXES = (".env", ".prev", ".rollback")
 # /data/<subdir> that belong to one service
 DATA_OWNERS = {"caddy": "caddy", "maint": "caddy", "postgres": "postgres"}

@@ -152,6 +152,10 @@ out=$(release v1.1.0); rc=$?
 assert_status $rc 0 "same tag again: ok"
 assert_contains "$out" "already at v1.1.0" "same tag again: says release is already there"
 assert_eq "$(built)" "v2" "same tag again: deploys it"
+out=$(release v1.1.0 --maint --no-rollback); rc=$?
+assert_status $rc 0 "release --maint --no-rollback: ok"
+remote=$(grep 'ssm send-command' "$T/log" | sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' | head -1 | base64 --decode)
+assert_contains "$remote" "--maint --no-rollback" "release --maint --no-rollback: both reach edh-deploy.sh"
 git checkout -q -- deploy/OPERATIONS.md
 
 # ============ bad input

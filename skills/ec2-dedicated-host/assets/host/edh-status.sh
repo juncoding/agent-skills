@@ -5,6 +5,10 @@
 echo "maintenance: $("$EDH_BIN_DIR/edh-maint.sh" status)"
 echo "image: $(sed -n 's/^APP_IMAGE=//p' "$EDH_APP_DIR/.env" 2>/dev/null)"
 echo "last deploy: $(tail -1 "$EDH_DATA_DIR/deploys.log" 2>/dev/null || echo none)"
+if [[ -s "$EDH_GUARD_FILE" ]]; then
+  echo "rollback guard: these images can't run on this database's schema (no deploy or rollback switches to them):"
+  awk -F'\t' '{ print "  " $1 "  (schema changed by " $3 ", " $2 ")" }' "$EDH_GUARD_FILE"
+fi
 last=$(ls -1t "$EDH_DATA_DIR"/backups/app-*.dump 2>/dev/null | head -1 || true)
 if [[ -n "$last" ]]; then echo "last local dump: $(basename "$last")"; else echo "last local dump: none"; fi
 # freshness = the last successful upload to S3; stale after 2 h (hourly schedule) or 26 h (daily)

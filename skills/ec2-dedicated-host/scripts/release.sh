@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
-# release.sh vX.Y.Z [--maint] — release_flow: tags only. Fast-forward origin/<prod_branch> (the release branch) to
+# release.sh vX.Y.Z [--maint] [--no-rollback] — release_flow: tags only. Fast-forward origin/<prod_branch> (the release branch) to
 # the commit of tag vX.Y.Z, then deploy it (deploy.sh, which builds origin/<prod_branch> from a clean worktree).
 # Refuses unless the tag is on origin and its commit is on origin/main (only reviewed code ships). Never moves the
 # release branch backwards and never force-pushes: going back is rollback.sh (the previous image) or a new fix tag.
-#   --maint  passed to deploy.sh (maintenance page during migrations)
+#   --maint        passed to deploy.sh (maintenance page during migrations)
+#   --no-rollback  passed to deploy.sh (migrations the previous version can't run on: no automatic rollback
+#                  once they changed the schema; see deploy.sh)
 # Exit: 0 released and live · 1 refused or failed (the message says whether origin/<prod_branch> moved).
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$(dirname "$0")/lib.sh"
-TAG="" MAINT=""
+TAG="" MAINT="" NO_ROLLBACK=""
 for a in "$@"; do
   case "$a" in
     --maint) MAINT=--maint ;;
+    --no-rollback) NO_ROLLBACK=--no-rollback ;;
     -*) die "unknown option: $a" ;;
-    *) [[ -z "$TAG" ]] || die "usage: release.sh vX.Y.Z [--maint]"; TAG="$a" ;;
+    *) [[ -z "$TAG" ]] || die "usage: release.sh vX.Y.Z [--maint] [--no-rollback]"; TAG="$a" ;;
   esac
 done
 load_config
 oplog_begin release "$TAG"
-[[ -n "$TAG" ]] || refuse "usage: release.sh vX.Y.Z [--maint]"
+[[ -n "$TAG" ]] || refuse "usage: release.sh vX.Y.Z [--maint] [--no-rollback]"
 [[ "$TAG" =~ ^v[0-9][A-Za-z0-9._-]*$ ]] || refuse "the release must be a v* tag like v1.2.3, not '$TAG'"
 [[ "$EDH_RELEASE_FLOW" == tags ]] \
   || refuse "release.sh needs release_flow: tags (and prod_branch: release) in deploy/deploy.yml; with release_flow: branch, deploy with deploy.sh"
@@ -65,8 +68,8 @@ fi
 
 rc=0
 EDH_OPLOG_SKIP=1 EDH_RELEASE_TAG="$TAG" EDH_RELEASE_COMMIT="$COMMIT" \
-  bash "$(dirname "$0")/deploy.sh" ${MAINT:+"$MAINT"} || rc=$?
+  bash "$(dirname "$0")/deploy.sh" ${MAINT:+"$MAINT"} ${NO_ROLLBACK:+"$NO_ROLLBACK"} || rc=$?
 if (( rc != 0 )); then
-  die "origin/$PB is at $TAG, but its deploy failed (see above) — fix and run deploy.sh to deploy origin/$PB again"
+  die "origin/$PB is at $TAG, but its deploy failed (see above, and follow its recovery steps) — once fixed, run deploy.sh${MAINT:+ $MAINT}${NO_ROLLBACK:+ $NO_ROLLBACK} to deploy origin/$PB again, or release a fix tag"
 fi
 ok "released $TAG"

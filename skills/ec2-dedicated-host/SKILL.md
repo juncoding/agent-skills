@@ -61,9 +61,9 @@ Run from the **project root** (the directory holding `deploy/`): `bash <this-ski
 |---|---|---|
 | "set this up" (first time) | `init.sh --client acme --domain app.example.com --emails ops@example.com --account-id 123456789012` | also `--env`, `--region`, `--gotenberg`, `--app-memory MB`, `--app-port N`, `--migrate "CMD"`, `--monitoring none`, `--no-instance-role`, `--release-flow tags` (releases by v* tag, below). Never overwrites `deploy/`. |
 | "create the server" | `provision.sh` (plan) → `provision.sh --apply` | plan is read-only; `--apply` only after the user approved the plan + cost |
-| "deploy" / "deploy to prod" | `deploy.sh` | `--maint` (maintenance page during migrations), `--allow-dirty` (in prod only with `--allow-non-main`), `--allow-non-main` (prod emergency only) |
-| "release v1.2.3" (only with `release_flow: tags`) | `release.sh v1.2.3` | `--maint`. Fast-forwards the release branch to the tag, then deploys it. `references/releases.md` |
-| "roll back" | `rollback.sh` | previous image + its env; database untouched; run again to roll forward. Asks first. |
+| "deploy" / "deploy to prod" | `deploy.sh` | `--maint` (maintenance page during migrations), `--no-rollback` (migrations the previous version can't run on: no automatic rollback once they changed the schema, below), `--allow-dirty` (in prod only with `--allow-non-main`), `--allow-non-main` (prod emergency only) |
+| "release v1.2.3" (only with `release_flow: tags`) | `release.sh v1.2.3` | `--maint`, `--no-rollback`. Fast-forwards the release branch to the tag, then deploys it. `references/releases.md` |
+| "roll back" | `rollback.sh` | previous image + its env; database untouched; run again to roll forward. Asks first. Refuses an image the rollback guard lists; `--allow-incompatible` only after the database was restored for it (ask the user). |
 | "maintenance on/off" | `maint.sh on --message "…" --until "23:00"` / `off` / `status` | `--no-link` hides the bypass link; `rotate-bypass` makes a new token (applied by the next deploy) |
 | "back up now" / "list backups" | `backup.sh now` / `backup.sh list [N]` | `now` writes to `db/daily/` |
 | "restore" | `restore.sh db --latest\|--date YYYY-MM-DD\|--key db/… [--check]` | `--check` = side database, live data untouched. Without it: replaces live DB (asks first). `--unverified` only with `--key`. |
@@ -139,6 +139,34 @@ don't matter — and refuses unless that commit is on `origin/main` with a `v*` 
 Every deploy prints the commit being deployed (`deploying <sha> "<subject>"`). Use `--maint` when a
 migration is risky or slow: users see the maintenance page while it runs.
 
+**`--no-rollback`** is for a release whose migrations the previous version can't run on (a new NOT NULL
+column it doesn't write, a constraint it breaks, a dropped column). Normally a new version that fails its
+health check is replaced by the previous one at once — but after such a migration the old code "passes"
+`/health` and then fails at work. With `--no-rollback` the server compares the schema (`pg_dump
+--schema-only`) before and after the migrations:
+
+- **unchanged** (nothing was pending): the deploy behaves as usual, rollback included;
+- **changed:** every image the server ran before goes into the **rollback guard**
+  (`/data/incompatible_images`); if anything then fails (the health check, `up`, an unexpected error, a
+  migration that committed part of its work, a cancelled deploy) **no previous image is started**:
+  maintenance is switched on and stays on until a deploy passes `/health`, `.env` names the new image, an
+  app container of an older image is removed (its last log lines saved to `/data/held-app-*.log`) so no
+  later `docker compose start`/`up` (restore, resize, upgrade) can bring it back, the failed new version is
+  left for diagnosis, and `edh-deploy.sh` exits 4;
+- **a migration that failed and left the schema unchanged** (exit 5): the previous version keeps running,
+  behind the maintenance page — a failed-migration record (Prisma `P3009`) can stop it booting on its next
+  restart, so clear the record and check `docker compose restart app` before `maint.sh off`.
+
+The comparison sees the schema only: a migration that changes data alone (a backfill, new enum rows) and
+breaks the previous version counts as "unchanged", so don't rely on `--no-rollback` for that — fix forward.
+After a hold, a deploy that passes `/health` switches maintenance off even without `--maint`
+(`maint.sh on`/`off` by hand cancel that). The guard is permanent: no deploy (with or without the flag) installs a listed image, no automatic rollback
+picks one and `rollback.sh` refuses one. Only `rollback.sh --allow-incompatible` removes an image's line, by
+switching to it — after the database was restored to a schema it runs on, which needs the user's explicit
+consent. `status.sh` lists the guard. Recovery from exit 4: fix forward with a new release (again
+`--no-rollback`), or restore the deploy's safety dump and then `rollback.sh --allow-incompatible`, on the
+user's word (`references/disaster-runbook.md`).
+
 ## Exit codes and what to tell the user
 
 Every local script exits **0** on success and non-zero on failure: **1** with an `ERROR:` line for every
@@ -149,10 +177,13 @@ message; don't retry blindly.
 |---|---|
 | deploy: `deploy stopped before the swap — the previous version is still serving` | Nothing changed for users. Show the cause (build, compose/Caddyfile invalid, migrations, backup). |
 | deploy: `new version failed its health check — rolled back to the previous version` | Site is up on the old version; an alert email went out. Look at app logs/`/health`; fix, commit, redeploy. |
+| deploy: `failed after its migrations changed the database schema … maintenance is ON and NO previous version was started again` | `--no-rollback` held the deploy (exit 4). Users see the maintenance page. Read the logs, fix forward with a new release; a restore + `rollback.sh --allow-incompatible` only on the user's word. Don't switch maintenance off until a version passes `/health`. |
+| deploy: `migrations failed and the database schema is unchanged; … behind the maintenance page` | `--no-rollback`, exit 5: the old version runs, maintenance on. Clear any failed-migration record, check the app restarts, then `maint.sh off`. |
 | deploy: `no healthy version is running — the site may be down` | **Urgent.** Run `status.sh`; see `references/disaster-runbook.md`. |
 | deploy/rollback: `still running on the server after the timeout` | Not necessarily failed: run `status.sh` to see how it ended. |
 | deploy: compose refusal (`backup manifest` / `access to the server itself` / `breaks the compose rules`) | `deploy/compose.yml` breaks the rules in `references/app-contract.md` (checked on the Mac and again on the server); fix the file. |
 | rollback: `previous version is unhealthy … stayed on the current version` | Nothing changed; the old image can't run with today's DB/config. |
+| rollback: `can't run on today's database schema (the rollback guard …)` | Refused, nothing changed: a later migration changed the schema that image ran on. Fix forward; going back needs a restore first (ask). |
 | restore: `not in this server's backup manifest` | Possible tampering, or the manifest was lost — read `references/backup-restore.md` before `--unverified`. |
 | restore disk: `swap stopped half way` (with commands) | Relay the printed state and put-back commands; ask before running them. |
 | any: `AWS credentials are for account X but deploy.yml says Y` | Wrong AWS profile; switch profile, never edit `account_id` to match. |
@@ -160,7 +191,8 @@ message; don't retry blindly.
 | any: `aborted` | The prompt wasn't confirmed; nothing happened. |
 
 On the server, `edh-deploy.sh` itself exits 0 deployed · 1 failed before the swap · 2 rolled back · 3 no
-healthy version; `deploy.sh` turns those into the messages above.
+healthy version · 4 held after a schema change (maintenance on, nothing rolled back) · 5 migrations failed,
+schema unchanged, maintenance on (`--no-rollback`); `edh-rollback.sh` exits 4 when the guard refuses; `deploy.sh` turns those into the messages above.
 
 ## Safety rules
 

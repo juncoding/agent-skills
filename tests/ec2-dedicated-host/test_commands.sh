@@ -93,8 +93,15 @@ assert_not_contains "$s" "with-decryption" "remote deploy command holds no secre
 : > "$T/log"
 out=$(run deploy.sh --maint); rc=$?
 assert_contains "$(script_n 1)" "$img --maint" "--maint is passed to edh-deploy.sh"
+: > "$T/log"
+out=$(run deploy.sh --maint --no-rollback); rc=$?
+assert_contains "$(script_n 1)" "$img --maint --no-rollback" "--no-rollback is passed to edh-deploy.sh"
+: > "$T/log"
+out=$(run deploy.sh --no-rollback --maint); rc=$?
+assert_contains "$(script_n 1)" "$img --maint --no-rollback" "--no-rollback before --maint: both passed"
 for c in "1:previous version is still serving" "2:rolled back to the previous version" "3:no healthy version is running" \
-         "3:site may be down" "7:site may be down"; do
+         "3:site may be down" "7:site may be down" "4:NO previous version was started again" "4:maintenance is ON" \
+         "4:rollback.sh --allow-incompatible" "5:still running behind the maintenance page" "5:migrate resolve --rolled-back"; do
   out=$(STUB_SSM_RC=${c%%:*} run deploy.sh); rc=$?
   assert_status $rc 1 "edh-deploy exit ${c%%:*}: deploy fails"
   assert_contains "$out" "${c#*:}" "edh-deploy exit ${c%%:*}: '${c#*:}'"
@@ -152,7 +159,7 @@ assert_contains "$out" 'variable ${APP_SUBDIR}' "compose: the variable is named"
 cp "$T/compose.save" deploy/compose.yml
 compose_refused 'variable ${HOME}' "$P" "$I" "    volumes:" '      - /data/uploads${HOME:-/..}:/x'
 # next to compose.yml only subdirectories, never the skill's own files
-for m in ./app.env ./postgres.env ./.env ./compose.yml ./app.env.rollback ./compose.yml.prev ./previous_image ./maint-templates \
+for m in ./app.env ./postgres.env ./.env ./compose.yml ./app.env.rollback ./compose.yml.prev ./previous_image ./maint_held ./maint-templates \
          ./x.env/sub; do
   compose_refused "reserved for the skill" "$P" "$I" "    volumes:" "      - $m:/x"
 done
@@ -284,6 +291,18 @@ assert_contains "$(grep enable-alarm-actions "$T/log")" "edh-acme-prod-site-down
 out=$(EDH_YES=1 run rollback.sh); rc=$?
 assert_status $rc 0 "rollback succeeds"
 assert_contains "$(script_n 1)" "/opt/edh/bin/edh-rollback.sh" "rollback runs edh-rollback.sh"
+assert_not_contains "$(script_n 1)" "--allow-incompatible" "plain rollback does not pass --allow-incompatible"
+out=$(EDH_YES=1 STUB_SSM_RC=4 run rollback.sh); rc=$?
+assert_status $rc 1 "edh-rollback exit 4: rollback refused"
+assert_contains "$out" "can't run on today's database schema" "edh-rollback exit 4: the rollback guard explained"
+assert_contains "$out" "rollback.sh --allow-incompatible" "edh-rollback exit 4: names the deliberate override"
+: > "$T/log"
+out=$(EDH_YES=1 run rollback.sh --allow-incompatible); rc=$?
+assert_status $rc 0 "rollback --allow-incompatible succeeds"
+assert_contains "$(script_n 1)" "/opt/edh/bin/edh-rollback.sh --allow-incompatible" "rollback --allow-incompatible is passed on"
+assert_contains "$out" "restored to a schema that image runs on" "rollback --allow-incompatible warns first"
+out=$(EDH_YES=1 run rollback.sh --bogus); rc=$?
+assert_status $rc 1 "rollback with an unknown option fails"
 out=$(EDH_YES=1 STUB_SSM_RC=1 run rollback.sh); rc=$?
 assert_status $rc 1 "edh-rollback exit 1: rollback fails"
 assert_contains "$out" "previous version is unhealthy" "edh-rollback exit 1: previous version unhealthy"
