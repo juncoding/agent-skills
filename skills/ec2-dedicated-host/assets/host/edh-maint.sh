@@ -36,8 +36,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 case "$cmd" in
-  on)     render "$msg" "$until_txt"; touch "$FLAG"; echo "maintenance ON" ;;
-  off)    rm -f "$FLAG"; echo "maintenance OFF" ;;
+  # on/off by hand also clear the mark a failed deploy leaves (edh-deploy.sh keep_maint_on): from then on the
+  # operator decides, and a later healthy deploy doesn't switch off a maintenance they put on
+  on)     render "$msg" "$until_txt"; touch "$FLAG"; rm -f "$EDH_APP_DIR/maint_held"; echo "maintenance ON" ;;
+  off)    rm -f "$FLAG" "$EDH_APP_DIR/maint_held"; echo "maintenance OFF" ;;
   status) if [[ -f "$FLAG" ]]; then echo on; else echo off; fi ;;
   render) render "$msg" "$until_txt" ;;
   *)      die "usage: edh-maint.sh on [--message T] [--until T] | off | status | render" ;;

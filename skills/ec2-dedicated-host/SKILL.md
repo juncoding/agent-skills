@@ -148,14 +148,19 @@ health check is replaced by the previous one at once — but after such a migrat
 - **unchanged** (nothing was pending): the deploy behaves as usual, rollback included;
 - **changed:** every image the server ran before goes into the **rollback guard**
   (`/data/incompatible_images`); if anything then fails (the health check, `up`, an unexpected error, a
-  migration that committed part of its work) **no previous image is started**: maintenance is switched on
-  and stays on, an app container still running an older image is stopped, the failed state is left for
-  diagnosis, and `edh-deploy.sh` exits 4;
+  migration that committed part of its work, a cancelled deploy) **no previous image is started**:
+  maintenance is switched on and stays on until a deploy passes `/health`, `.env` names the new image, an
+  app container of an older image is removed (its last log lines saved to `/data/held-app-*.log`) so no
+  later `docker compose start`/`up` (restore, resize, upgrade) can bring it back, the failed new version is
+  left for diagnosis, and `edh-deploy.sh` exits 4;
 - **a migration that failed and left the schema unchanged** (exit 5): the previous version keeps running,
   behind the maintenance page — a failed-migration record (Prisma `P3009`) can stop it booting on its next
   restart, so clear the record and check `docker compose restart app` before `maint.sh off`.
 
-The guard is permanent: no deploy (with or without the flag) installs a listed image, no automatic rollback
+The comparison sees the schema only: a migration that changes data alone (a backfill, new enum rows) and
+breaks the previous version counts as "unchanged", so don't rely on `--no-rollback` for that — fix forward.
+After a hold, a deploy that passes `/health` switches maintenance off even without `--maint`
+(`maint.sh on`/`off` by hand cancel that). The guard is permanent: no deploy (with or without the flag) installs a listed image, no automatic rollback
 picks one and `rollback.sh` refuses one. Only `rollback.sh --allow-incompatible` removes an image's line, by
 switching to it — after the database was restored to a schema it runs on, which needs the user's explicit
 consent. `status.sh` lists the guard. Recovery from exit 4: fix forward with a new release (again

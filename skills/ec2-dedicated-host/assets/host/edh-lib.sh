@@ -90,7 +90,10 @@ sha256_of() {
 # a schema that image runs on) removes its line. It lives in /data beside the database it describes, so a
 # later deploy, a new release dir or an OS upgrade doesn't forget it; no container mounts /data itself.
 EDH_GUARD_FILE="${EDH_GUARD_FILE:-$EDH_DATA_DIR/incompatible_images}"
-image_blocked() { [[ -n "${1:-}" && -f "$EDH_GUARD_FILE" ]] && cut -f1 "$EDH_GUARD_FILE" | grep -qxF -- "$1"; }
+image_blocked() {
+  [[ -n "${1:-}" && -f "$EDH_GUARD_FILE" ]] || return 1
+  awk -F'\t' -v i="$1" '$1 == i { found = 1 } END { exit !found }' "$EDH_GUARD_FILE"
+}
 # block_image <image> <by-image> — add <image> to the guard (once)
 block_image() {
   if image_blocked "$1"; then return 0; fi
@@ -110,15 +113,17 @@ unblock_image() {
 # tool's history rows included — is not part of it, so a migration that failed and rolled back leaves it as it
 # was. Non-zero (and prints nothing) if the schema can't be read.
 schema_fingerprint() {
-  local f
+  local f h
   f=$(mktemp) || return 1
   if ! dc exec -T postgres pg_dump -U app -d app --schema-only --no-owner --no-privileges > "$f" 2>/dev/null \
      || [[ ! -s "$f" ]]; then
     rm -f "$f"; return 1
   fi
   grep -v -E '^(--|\\restrict |\\unrestrict )' "$f" > "$f.schema" || true
-  sha256_of "$f.schema"
+  h=$(sha256_of "$f.schema") || h=""
   rm -f "$f" "$f.schema"
+  [[ -n "$h" ]] || return 1
+  printf '%s\n' "$h"
 }
 
 # app_env_defaults — app.env lines so far on stdin; prints the defaults the app gets for names it hasn't set

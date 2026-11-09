@@ -17,17 +17,20 @@ Manager shell (`aws ssm start-session --target <instance-id>`; no SSH). Never pr
 
 - **Symptom:** deploy says `failed after its migrations changed the database schema … maintenance is ON`;
   a "deploy failed after migrations" (or "migrations failed, schema changed" / "no compatible rollback") email.
-- **State:** maintenance ON; the failed version left as it is (or not started); any container of an older
-  image stopped; every older image listed in `/data/incompatible_images` (`status.sh` shows it). Users see
-  the maintenance page; nothing is serving on a schema it can't run on.
+- **State:** maintenance ON; `.env` names the new image; the failed version left as it is (or created, not
+  started); any container of an older image removed, its last log lines in `/data/held-app-<time>.log`;
+  every older image listed in `/data/incompatible_images` (`status.sh` shows it). Users see the maintenance
+  page; nothing is serving on a schema it can't run on.
 - **First:** `status.sh`, `cd /opt/edh/app && sudo docker compose logs --tail 200 app`, and the deploy output.
-- **Fix forward (preferred):** fix, merge, tag, `release.sh vX.Y.Z --maint --no-rollback`. It switches
-  maintenance off once healthy.
+- **Fix forward (preferred):** fix, merge, tag, `release.sh vX.Y.Z --maint --no-rollback`. The first
+  deploy that passes `/health` switches maintenance off (with or without `--maint`). If a migration failed,
+  clear its record first (Prisma `P3009`: `migrate resolve`, after checking what it left).
 - **Going back (only on the user's explicit word — it replaces live data):** `restore.sh db --key
   db/safety/<the deploy's dump> --check`, then without `--check`; then `rollback.sh --allow-incompatible`
-  (switches to the previous image and removes its guard line); `maint.sh off` once `/health` passes. If the
-  image to go back to is the one the stopped container ran, `docker compose start app` after the restore, and
-  remove its line from `/data/incompatible_images` by hand (sudo) once it runs.
+  (switches to the image recorded as previous and removes its guard line); `maint.sh off` once `/health`
+  passes. If that isn't the image you need (a migration failed part way, so the image that was running is
+  the one to go back to), set `APP_IMAGE=` to it in `/opt/edh/app/.env`, `docker compose up -d app`, check
+  `/health`, then remove its line from `/data/incompatible_images` (sudo) — each step on the user's word.
 
 ## Migrations failed, schema unchanged (`--no-rollback`, exit 5)
 

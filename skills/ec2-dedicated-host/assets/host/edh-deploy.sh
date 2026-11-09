@@ -38,6 +38,9 @@ SWAPPED=0     # 1 once the app may be running the new image
 DEPLOYED=0    # 1 once the new image passed its health check: nothing after that rolls it back
 EXPECTED=0    # 1 when exiting through done_exit (a planned outcome)
 ADVANCED=0    # 1 once (--no-rollback) the migrations changed the schema: the previous image never runs again
+KEEP_MAINT=0  # 1 when an abort must leave maintenance on (an interrupted --no-rollback migration, schema unchanged)
+SCHEMA_BEFORE=""
+MIGRATING=0   # 1 (--no-rollback) from the start of the migrations until the schema comparison has decided ADVANCED
 ROLLBACK_BLOCKED=""   # the rollback target, when the guard says it can't run on this schema
 maint_on=0
 STAGE=""
@@ -48,35 +51,54 @@ KEPT=".env app.env postgres.env compose.yml caddy/Caddyfile"   # restored from *
 done_exit() { EXPECTED=1; exit "$1"; }
 
 # hold <subject> <message> — the outcome once the previous image must not run again: maintenance ON (it stays
-# on), the state left as it is for whoever recovers it, a deploys.log line, an alert, exit 4. Never restores
-# the previous configuration or starts the previous image.
+# on until a deploy passes /health), no container of an older image left to start, the failed state kept for
+# whoever recovers it, a deploys.log line, an alert, exit 4. Never restores the previous configuration.
 hold() {
-  stop_old_app
-  "$EDH_BIN_DIR/edh-maint.sh" on --message "We're upgrading the system." --until "shortly" >/dev/null 2>&1 \
-    || log "could not switch maintenance on — run: edh-maint.sh on"
-  maint_on=0
+  retire_old_app
+  keep_maint_on
   printf '%s\t%s\t%s\theld: %s\n' "$(date -u +%FT%TZ)" "$IMAGE" "${PREV:--}" "$1" >> "$EDH_DATA_DIR/deploys.log" 2>/dev/null \
     || log "could not append to deploys.log"
   alert "$1" "$2"
   log "$2"
   done_exit 4
 }
-# stop_old_app — stop the app container unless it runs this deploy's image: after the migrations changed the
-# schema, a container of the previous image (still running, or left by a failed `up`) must not keep serving or
-# running jobs on it. Stopped, not removed: its logs stay. A failed new version is left running for diagnosis.
-stop_old_app() {
-  local id img
-  id=$(dc ps -q app 2>/dev/null || true)
+# keep_maint_on — maintenance ON, marked as left on by a failed deploy (edh-maint.sh on/off clear the mark): the
+# next deploy that passes /health switches it off, with or without --maint
+keep_maint_on() {
+  "$EDH_BIN_DIR/edh-maint.sh" on --message "We're upgrading the system." --until "shortly" >/dev/null 2>&1 \
+    || log "could not switch maintenance on — run: edh-maint.sh on"
+  maint_on=0
+  : > "$EDH_APP_DIR/maint_held" 2>/dev/null || true
+}
+# retire_old_app — after the migrations changed the schema, nothing may start an older image again: not this
+# script, and not a later `docker compose start` / `up` (restore.sh's failure path, resize.sh, upgrade.sh). So .env
+# names this deploy's image, and an app container of another image — running, or stopped — is saved to a log
+# file and removed, its place taken by a created (not started) container of this image. A failed container of
+# this image is left as it is, running, for diagnosis.
+retire_old_app() {
+  local id img f
+  if [[ "$(current_image)" != "$IMAGE" ]]; then
+    write_compose_env "$IMAGE" || log "could not point .env at $IMAGE — check $EDH_APP_DIR/.env before any docker compose up"
+  fi
+  id=$(dc ps -a -q app 2>/dev/null | head -1 || true)
   [[ -n "$id" ]] || return 0
   img=$(docker inspect -f '{{.Config.Image}}' "$id" 2>/dev/null || true)
-  if [[ "$img" != "$IMAGE" ]]; then
-    if dc stop app >/dev/null 2>&1; then log "stopped the app container running ${img:-an unknown image}: it may not run on this schema"
-    else log "could not stop the app container running ${img:-an unknown image} — stop it: docker compose stop app"; fi
+  [[ "$img" != "$IMAGE" ]] || return 0
+  f="$EDH_DATA_DIR/held-app-$(date -u +%Y%m%dT%H%M%SZ).log"
+  dc logs --no-color --tail 2000 app > "$f" 2>&1 || true
+  if dc rm -s -f app >/dev/null 2>&1; then
+    log "removed the app container of ${img:-an unknown image}: it may not run on this schema (its last log lines: $f)"
+  else
+    log "could not remove the app container of ${img:-an unknown image} — stop and remove it: docker compose rm -s -f app"
+  fi
+  # only once .env names this image: created from an older .env, the container would be the old image again
+  if [[ "$(current_image)" == "$IMAGE" ]]; then
+    dc up --no-start app >/dev/null 2>&1 || log "could not create the app container of $IMAGE (nothing is serving; maintenance is on)"
   fi
 }
 # recovery_steps — the way out of exit 4, for the alert and the log
 recovery_steps() {
-  printf '%s' "Maintenance is ON and stays on. Recover by fixing forward: deploy a corrected release (with --no-rollback again). Going back instead means restoring the database to a schema the old version runs on (restore.sh db from this deploy's safety dump: a destructive step that needs explicit authorization), then rollback.sh --allow-incompatible. Switch maintenance off only once a version passes /health. The images that can't run on this schema are listed in $EDH_GUARD_FILE."
+  printf '%s' "Maintenance is ON and stays on until a deploy passes /health. Recover by fixing forward: deploy a corrected release (with --no-rollback again). If a migration failed, its tool may have recorded the failure (Prisma: a failed _prisma_migrations row, P3009) and refuse to migrate again until it is cleared (Prisma: migrate resolve, after checking what the migration left). Going back instead means restoring the database to a schema the old version runs on (restore.sh db from this deploy's safety dump: a destructive step that needs explicit authorization), then rollback.sh --allow-incompatible. The images that can't run on this schema are listed in $EDH_GUARD_FILE."
 }
 # block_prev — after the migrations changed the schema, record every image this server ran before (the one
 # being replaced, edh-rollback.sh's previous image, every image in deploys.log) as unable to run on it: each of
@@ -91,7 +113,10 @@ block_prev() {
       done
 }
 reload_caddy_once() { dc exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || log "caddy reload failed"; }
-finish_maint() { if (( maint_on )); then "$EDH_BIN_DIR/edh-maint.sh" off >/dev/null; maint_on=0; fi; }
+finish_maint() {
+  if (( KEEP_MAINT )); then keep_maint_on; return 0; fi
+  if (( maint_on )); then "$EDH_BIN_DIR/edh-maint.sh" off >/dev/null; maint_on=0; fi
+}
 
 save_prev() { # copy the live config to *.prev before changing anything
   local f
@@ -153,6 +178,17 @@ on_exit() {
     alert "deploy: follow-up step failed at line $line" "$IMAGE is deployed and healthy, but a step after the health check failed (exit $rc). See the deploy output."
     exit 0
   fi
+  if (( MIGRATING && ! ADVANCED )); then
+    # interrupted while migrating (or before the comparison): decide from the schema itself, as the normal path does
+    local now
+    now=$(schema_fingerprint) || now=""
+    if [[ -z "$now" || "$now" != "$SCHEMA_BEFORE" ]]; then
+      ADVANCED=1; block_prev
+      log "interrupted during the migrations, and the schema changed (or could not be read): treated as changed"
+    else
+      KEEP_MAINT=1   # unchanged: the previous version keeps running, but maybe not restart-safe (exit 5's reason)
+    fi
+  fi
   if (( ADVANCED )) || { (( SWAPPED )) && [[ -n "$ROLLBACK_BLOCKED" ]]; }; then
     # the previous image must not take over: keep this deploy's state, behind the maintenance page
     hold "deploy failed after migrations" "Deploying $IMAGE stopped unexpectedly at line $line (exit $rc) after its migrations changed the database schema (or with no image to roll back to that runs on it). No previous image was started again, and an app container still running another image was stopped. $(recovery_steps)"
@@ -189,11 +225,16 @@ on_exit() {
 PREV=$(sed -n 's/^APP_IMAGE=//p' "$EDH_APP_DIR/.env" 2>/dev/null || true)
 ENV_SAVED=0   # 1 once the previous edh.env is saved as edh.env.prev
 trap 'on_exit $LINENO' EXIT
+# a signal (SSM cancelling the command, a terminal closing) must reach on_exit as a failure: without these the EXIT
+# trap sees status 0 and would treat an interrupted deploy as finished
+trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 edh_lock
 # the rollback guard holds for every deploy, with or without --no-rollback: an image a later migration left
 # behind is never put back by a deploy either (only edh-rollback.sh --allow-incompatible, after a restore)
 if image_blocked "$IMAGE"; then
-  log "refused: $IMAGE can't run on this database's schema — a later deploy's migrations changed it ($EDH_GUARD_FILE). Nothing changed; the current version keeps serving. Deploy a newer release; going back needs the database restored first, then rollback.sh --allow-incompatible."
+  msg="Refused to deploy $IMAGE: it can't run on this database's schema, which a later deploy's migrations changed ($EDH_GUARD_FILE). Nothing changed; the current version keeps serving. Deploy a newer release; going back needs the database restored first, then rollback.sh --allow-incompatible."
+  log "$msg"
+  alert "deploy refused" "$msg"
   done_exit 1
 fi
 install -d -m 755 "$EDH_BIN_DIR" "$(dirname "$EDH_ENV_FILE")"
@@ -444,10 +485,11 @@ if [[ "$MAINT" == --maint ]]; then
 fi
 "$EDH_BIN_DIR/edh-backup.sh" --tag safety --force >/dev/null || die "pre-deploy backup failed — not deploying"
 if [[ -n "${EDH_MIGRATE_CMD:-}" ]]; then
-  SCHEMA_BEFORE=""
   if (( NO_ROLLBACK )); then
-    SCHEMA_BEFORE=$(schema_fingerprint) \
+    SCHEMA_BEFORE=$(schema_fingerprint) || SCHEMA_BEFORE=""
+    [[ -n "$SCHEMA_BEFORE" ]] \
       || die "--no-rollback: could not read the database schema before the migrations (it is compared after them) — not deploying"
+    MIGRATING=1   # from here an interruption is judged by the schema (on_exit)
   fi
   log "running migrations with $IMAGE"
   mrc=0
@@ -455,7 +497,8 @@ if [[ -n "${EDH_MIGRATE_CMD:-}" ]]; then
   if (( NO_ROLLBACK )); then
     # what decides whether the previous image may run again is the schema, not the migration's exit code: a
     # failed run may have committed part of its work, and a successful one may have changed nothing
-    schema_after=$(schema_fingerprint) || schema_after=unreadable
+    schema_after=$(schema_fingerprint) || schema_after=""
+    if [[ -z "$schema_after" ]]; then schema_after=unreadable; fi
     if [[ "$schema_after" != "$SCHEMA_BEFORE" ]]; then
       ADVANCED=1
       block_prev
@@ -466,6 +509,7 @@ if [[ -n "${EDH_MIGRATE_CMD:-}" ]]; then
     else
       log "the migrations left the database schema unchanged"
     fi
+    MIGRATING=0
   fi
   if (( mrc != 0 )); then
     if (( ADVANCED )); then
@@ -479,20 +523,24 @@ if [[ -n "${EDH_MIGRATE_CMD:-}" ]]; then
     restore_prev $KEPT
     restore_env_file
     if [[ -z "$PREV" ]]; then abort_first_deploy "deploy failed" "Migrations failed for $IMAGE."; fi
-    if ! revert_infra; then
-      alert "SITE DOWN after deploy" "Migrations failed for $IMAGE, and with the previous configuration restored the app fails /health."
-      done_exit 3
-    fi
     restart_note="If the migration tool recorded the failed migration (Prisma: a failed _prisma_migrations row, error P3009), an app that migrates when it starts will refuse to boot until it is cleared: fix the cause, clear the record (Prisma: migrate resolve --rolled-back <migration>, run in the app container), and check the app restarts (docker compose restart app, then /health) before anything restarts it."
     if (( NO_ROLLBACK )); then
-      # the schema is unchanged, so the version running keeps working — but it may not survive a restart
-      "$EDH_BIN_DIR/edh-maint.sh" on --message "We're upgrading the system." --until "shortly" >/dev/null 2>&1 \
-        || log "could not switch maintenance on — run: edh-maint.sh on"
-      maint_on=0
-      msg="Migrations failed for $IMAGE and the database schema is unchanged. The previous version (${PREV}) is still running with its previous configuration, behind the maintenance page (--no-rollback keeps it on). Don't assume it can restart. $restart_note Then switch maintenance off (maint.sh off) and release again."
+      # the schema is unchanged, so the version running keeps working — but it may not survive a restart; and
+      # after an earlier hold nothing may be running at all: maintenance on either way, exit 5
+      keep_maint_on
+      if revert_infra; then
+        state="The previous version (${PREV}) is still running with its previous configuration, behind the maintenance page (--no-rollback keeps it on). Don't assume it can restart."
+      else
+        state="No version is serving (the app is not running or fails /health: an earlier held deploy may have left it stopped); the maintenance page is up."
+      fi
+      msg="Migrations failed for $IMAGE and the database schema is unchanged. $state $restart_note Switch maintenance off (maint.sh off) only once a version passes /health, then release again."
       alert "deploy failed, maintenance on" "$msg"
       log "$msg"
       done_exit 5
+    fi
+    if ! revert_infra; then
+      alert "SITE DOWN after deploy" "Migrations failed for $IMAGE, and with the previous configuration restored the app fails /health."
+      done_exit 3
     fi
     finish_maint
     alert "deploy failed" "Migrations failed for $IMAGE. The previous version is still running with its previous configuration. $restart_note"
@@ -505,6 +553,10 @@ write_compose_env "$IMAGE"
 if dc up -d app && wait_health; then
   DEPLOYED=1   # healthy: from here on everything is best-effort bookkeeping
   finish_maint || log "could not switch maintenance off — run: edh-maint.sh off"
+  if [[ -f "$EDH_APP_DIR/maint_held" ]]; then   # left on by a failed deploy: a version passes /health now
+    if "$EDH_BIN_DIR/edh-maint.sh" off >/dev/null; then log "maintenance (left on by a failed deploy) switched off: $IMAGE passes /health"
+    else log "could not switch maintenance off — run: edh-maint.sh off"; fi
+  fi
   if [[ -n "$PREV" && "$PREV" != "$IMAGE" ]]; then record_previous || log "could not record the previous image for edh-rollback.sh"; fi
   printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$IMAGE" "${PREV:--}" >> "$EDH_DATA_DIR/deploys.log" \
     || log "could not append to deploys.log"

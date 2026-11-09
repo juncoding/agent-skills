@@ -70,6 +70,6 @@ rc=0
 EDH_OPLOG_SKIP=1 EDH_RELEASE_TAG="$TAG" EDH_RELEASE_COMMIT="$COMMIT" \
   bash "$(dirname "$0")/deploy.sh" ${MAINT:+"$MAINT"} ${NO_ROLLBACK:+"$NO_ROLLBACK"} || rc=$?
 if (( rc != 0 )); then
-  die "origin/$PB is at $TAG, but its deploy failed (see above) — fix and run deploy.sh to deploy origin/$PB again"
+  die "origin/$PB is at $TAG, but its deploy failed (see above, and follow its recovery steps) — once fixed, run deploy.sh${MAINT:+ $MAINT}${NO_ROLLBACK:+ $NO_ROLLBACK} to deploy origin/$PB again, or release a fix tag"
 fi
 ok "released $TAG"

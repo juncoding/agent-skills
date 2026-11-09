@@ -11,7 +11,7 @@ export EDH_HTTP_PORT=18081 EDH_HTTPS_PORT=18443
 REAL_DOCKER=$(command -v docker)
 cleanup() {
   docker compose -p $P down -v >/dev/null 2>&1
-  docker image rm edh-fixture:good2 edh-fixture:bad2 edh-fixture:good3 edh-fixture:bad3 edh-fixture:broken edh-test-caddy:pinned \
+  docker image rm edh-fixture:good2 edh-fixture:bad2 edh-fixture:good3 edh-fixture:bad3 edh-fixture:good4 edh-fixture:broken edh-test-caddy:pinned \
     >/dev/null 2>&1
   rm -rf "$T"
 }
@@ -88,6 +88,7 @@ out=$(printf 'FROM busybox:1.36\nCMD ["/nonexistent-binary"]\n' | docker build -
   || bail "docker build failed" "$out"
 docker tag edh-fixture:good edh-fixture:good2; docker tag edh-fixture:bad edh-fixture:bad2
 docker tag edh-fixture:good edh-fixture:good3; docker tag edh-fixture:bad edh-fixture:bad3
+docker tag edh-fixture:good edh-fixture:good4
 
 # shims (each used only where a test puts its dir first on PATH)
 mkdir -p "$T/flockbin" "$T/mvbin" "$T/imgbin"
@@ -554,9 +555,11 @@ assert_eq "$(pgq "select count(*) from pg_tables where tablename like 'adv\_%'")
 assert_status "$(bash "$EDH_BIN_DIR/edh-rollback.sh" >"$T/out" 2>&1; echo $?)" 4 "held: edh-rollback.sh refuses (exit 4)"
 assert_eq "$(img)" "edh-fixture:bad3" "held: refused rollback changes nothing"
 step
-assert_status "$(deploy "$T/r1" edh-fixture:good2 --maint --no-rollback)" 0 "fix forward after the hold: deployed"
+assert_status "$(deploy "$T/r1" edh-fixture:good2 --maint --no-rollback)" 1 "after the hold, an image that ran before (good2) is refused"
+assert_eq "$(img)" "edh-fixture:bad3" "refused: nothing changed"
+assert_status "$(deploy "$T/r1" edh-fixture:good4 --no-rollback)" 0 "fix forward after the hold (a new image, no --maint): deployed"
 assert_eq "$(site)" "fixture-ok" "fix forward: site serves"
-assert_eq "$(bash "$EDH_BIN_DIR/edh-maint.sh" status)" "off" "fix forward: maintenance off"
+assert_eq "$(bash "$EDH_BIN_DIR/edh-maint.sh" status)" "off" "fix forward: the held maintenance switched off"
 assert_status "$(deploy "$T/r1" "$before_img")" 1 "the image left behind can't be deployed again"
 assert_eq "$(site)" "fixture-ok" "refused deploy: site still serves"
 rm -f "$T/data/incompatible_images"   # the checks below run without a guard
